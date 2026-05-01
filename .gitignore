@@ -33,6 +33,7 @@ go.work.sum
 
 docs/_drafts/
 docs/private/
+docs/adr/
 *.private.md
 NOTES.md
 TODO.md
