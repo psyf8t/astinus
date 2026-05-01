@@ -32,6 +32,7 @@ go.work.sum
 .vscode/
 
 docs/_drafts/
+docs/private/
 *.private.md
 NOTES.md
 TODO.md

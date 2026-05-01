@@ -2,7 +2,8 @@
 
 # ─── Build stage ────────────────────────────────────────────────────────────
 # Pin a specific Go minor; bump deliberately.
-FROM golang:1.22-alpine AS build
+# Floor is set by go.mod (currently 1.23, see ADR-0003).
+FROM golang:1.23-alpine AS build
 
 WORKDIR /src
 

@@ -1,0 +1,59 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:f0e1d2c3-b4a5-6789-0123-456789abcdef",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-04-30T11:00:00Z",
+    "tools": {
+      "components": [
+        {"type": "application", "supplier": {"name": "anchore"}, "name": "syft", "version": "1.16.0"}
+      ]
+    },
+    "component": {
+      "bom-ref": "pkg:oci/nginx@sha256:def?tag=1.27",
+      "type": "container",
+      "name": "nginx",
+      "version": "1.27"
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "pkg:deb/debian/libc6@2.36-9",
+      "type": "library",
+      "name": "libc6",
+      "version": "2.36-9",
+      "purl": "pkg:deb/debian/libc6@2.36-9?arch=amd64",
+      "supplier": {"name": "GNU"},
+      "licenses": [{"license": {"id": "LGPL-2.1-or-later"}}]
+    },
+    {
+      "bom-ref": "pkg:deb/debian/nginx@1.27.0-1",
+      "type": "library",
+      "name": "nginx",
+      "version": "1.27.0-1",
+      "purl": "pkg:deb/debian/nginx@1.27.0-1?arch=amd64",
+      "cpe": "cpe:2.3:a:nginx:nginx:1.27.0:*:*:*:*:*:*:*",
+      "evidence": {
+        "occurrences": [
+          {"location": "/var/lib/dpkg/status"}
+        ]
+      }
+    },
+    {
+      "bom-ref": "pkg:deb/debian/openssl@3.0.13-1",
+      "type": "library",
+      "name": "openssl",
+      "version": "3.0.13-1",
+      "purl": "pkg:deb/debian/openssl@3.0.13-1?arch=amd64",
+      "hashes": [
+        {"alg": "SHA-256", "content": "22222222222222222222222222222222"},
+        {"alg": "SHA-1", "content": "3333333333333333"}
+      ]
+    }
+  ],
+  "dependencies": [
+    {"ref": "pkg:deb/debian/nginx@1.27.0-1", "dependsOn": ["pkg:deb/debian/libc6@2.36-9", "pkg:deb/debian/openssl@3.0.13-1"]},
+    {"ref": "pkg:deb/debian/openssl@3.0.13-1", "dependsOn": ["pkg:deb/debian/libc6@2.36-9"]}
+  ]
+}

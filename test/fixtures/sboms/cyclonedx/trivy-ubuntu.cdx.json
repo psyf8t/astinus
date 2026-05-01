@@ -1,0 +1,45 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:11112222-3333-4444-5555-666677778888",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-04-30T12:34:56Z",
+    "tools": {
+      "components": [
+        {"type": "application", "supplier": {"name": "aquasecurity"}, "name": "trivy", "version": "0.55.0"}
+      ]
+    },
+    "component": {
+      "bom-ref": "pkg:oci/ubuntu@sha256:cafe?tag=24.04",
+      "type": "container",
+      "name": "ubuntu",
+      "version": "24.04"
+    },
+    "properties": [
+      {"name": "aquasecurity:trivy:SchemaVersion", "value": "2"}
+    ]
+  },
+  "components": [
+    {
+      "bom-ref": "pkg:deb/ubuntu/bash@5.2.21",
+      "type": "library",
+      "name": "bash",
+      "version": "5.2.21-2ubuntu4",
+      "purl": "pkg:deb/ubuntu/bash@5.2.21-2ubuntu4?arch=amd64&distro=ubuntu-24.04",
+      "licenses": [{"license": {"name": "GPL-3"}}],
+      "properties": [
+        {"name": "aquasecurity:trivy:LayerDigest", "value": "sha256:fedc"},
+        {"name": "aquasecurity:trivy:LayerDiffID", "value": "sha256:1234"},
+        {"name": "aquasecurity:trivy:PkgID", "value": "bash@5.2.21-2ubuntu4"}
+      ]
+    },
+    {
+      "bom-ref": "pkg:deb/ubuntu/coreutils@9.4-3ubuntu6",
+      "type": "library",
+      "name": "coreutils",
+      "version": "9.4-3ubuntu6",
+      "purl": "pkg:deb/ubuntu/coreutils@9.4-3ubuntu6?arch=amd64&distro=ubuntu-24.04"
+    }
+  ]
+}
