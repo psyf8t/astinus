@@ -151,12 +151,12 @@ Reproducible builds, SLSA Level 3 provenance, and Cosign-signed releases are par
 | Provenance per component (which `RUN`/`COPY`) | ❌ | ✅ |
  
 ## Roadmap
- 
+
 The project is broken into 16 implementation stages. Current state:
- 
+
 - ✅ Specification finalized
-- 🚧 **Stage 0**: Project bootstrap *(in progress)*
-- ⬜ Stage 1: Canonical SBOM model + CycloneDX I/O
+- ✅ **Stage 0**: Project bootstrap — CLI skeleton, build/lint/CI infrastructure, `astinus version`
+- ✅ **Stage 1**: Canonical SBOM model + CycloneDX 1.6 read/write with round-trip preservation of Astinus-added fields
 - ⬜ Stage 2: Image source foundation (registry + archive)
 - ⬜ Stage 3: Pipeline + Layer Attribution enricher
 - ⬜ Stage 4: Untracked components detection
@@ -164,7 +164,8 @@ The project is broken into 16 implementation stages. Current state:
 - ⬜ Stage 6: CPE enrichment
 - ⬜ Stage 7: SPDX support
 - ⬜ Stages 8–15: Advanced auth, output formats, air-gapped mode, fingerprint matchers, policy framework, production polish
-See the [full specification](docs/SPEC.md) for stage details and acceptance criteria.
+
+The full specification with stage details and acceptance criteria is currently maintained as a private working document.
  
 ## Extensibility
  
