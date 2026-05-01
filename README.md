@@ -157,8 +157,8 @@ The project is broken into 16 implementation stages. Current state:
 - ✅ Specification finalized
 - ✅ **Stage 0**: Project bootstrap — CLI skeleton, build/lint/CI infrastructure, `astinus version`
 - ✅ **Stage 1**: Canonical SBOM model + CycloneDX 1.6 read/write with round-trip preservation of Astinus-added fields
-- ⬜ Stage 2: Image source foundation (registry + archive)
-- ⬜ Stage 3: Pipeline + Layer Attribution enricher
+- ✅ **Stage 2**: Image source foundation — registry + tar archive sources, env/docker-config credential chain, custom-CA / proxy / retry transport
+- ⬜ Stage 3 (next): Pipeline + Layer Attribution enricher
 - ⬜ Stage 4: Untracked components detection
 - ⬜ Stage 5: Base image diff
 - ⬜ Stage 6: CPE enrichment
