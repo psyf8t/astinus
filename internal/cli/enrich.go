@@ -17,6 +17,7 @@ import (
 	"github.com/psyf8t/astinus/internal/enrich/basediff"
 	"github.com/psyf8t/astinus/internal/enrich/cpe"
 	"github.com/psyf8t/astinus/internal/enrich/untracked"
+	"github.com/psyf8t/astinus/internal/fingerprint/matcher"
 	"github.com/psyf8t/astinus/internal/image"
 	"github.com/psyf8t/astinus/internal/image/auth"
 	"github.com/psyf8t/astinus/internal/image/source"
@@ -34,6 +35,10 @@ const (
 	ExitImageAccess = 4
 	ExitEnrich      = 5
 	ExitOutputWrite = 6
+	// ExitNoNetwork is emitted when --no-network is set and the run
+	// would require an outbound network call (e.g. registry pull).
+	// Spec section 6.4.
+	ExitNoNetwork = 30
 )
 
 // enrichOptions are bound to flags by newEnrichCommand.
@@ -50,6 +55,8 @@ type enrichOptions struct {
 	skipTLS      bool
 	base         string // "auto" | "none" | <ref>
 	configPath   string // copied from root --config in RunE
+	noNetwork    bool
+	offlineDB    string
 }
 
 func newEnrichCommand() *cobra.Command {
@@ -91,6 +98,10 @@ add the others.`,
 	flags.StringVar(&opts.caBundle, "ca-cert", "", "Path to a custom CA bundle (PEM)")
 	flags.StringVar(&opts.base, "base", "auto",
 		"Base image to diff against: auto|none|<ref>")
+	flags.BoolVar(&opts.noNetwork, "no-network", false,
+		"Refuse outbound network calls (air-gapped mode)")
+	flags.StringVar(&opts.offlineDB, "offline-db", "",
+		"Path to offline catalogue (built via `astinus offline-db build`)")
 
 	_ = cmd.MarkFlagRequired("sbom")
 	_ = cmd.MarkFlagRequired("image")
@@ -114,6 +125,12 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 	cfg, err := loadConfigIfPresent(opts.configPath)
 	if err != nil {
 		return newExitError(ExitInvalidArgs, err)
+	}
+
+	if opts.noNetwork && refRequiresNetwork(opts.imageRef) {
+		return newExitError(ExitNoNetwork,
+			fmt.Errorf("--no-network: image %q requires a registry pull; use --image with archive:// or oci:// instead",
+				opts.imageRef))
 	}
 
 	tr, err := buildTransport(opts, cfg)
@@ -326,15 +343,62 @@ func authProviderForRegistry(r cfgpkg.RegistryConfig) auth.CredentialProvider {
 }
 
 // allEnrichers returns the canonical list of enrichers in execution
-// order. Stage 6 completes the chain:
+// order. Stage 12 plumbs --offline-db into both untracked
+// (LocalMatcher) and cpe (LocalDictionaryResolver in the chain).
+//
 // attribution → basediff → untracked → cpe.
 func allEnrichers(opts *enrichOptions, sourceOpts []source.Option) []enrich.Enricher {
+	untrackedEnricher := untracked.New()
+	cpeEnricher := cpe.New()
+
+	if opts.offlineDB != "" {
+		if matcher, err := buildLocalMatcher(opts.offlineDB); err == nil {
+			untrackedEnricher = untracked.NewWithOptions(untracked.Options{Matcher: matcher})
+		}
+		if chain, err := cpe.ChainWithLocal(opts.offlineDB); err == nil {
+			cpeEnricher = cpe.NewWithResolver(chain)
+		}
+	}
+
 	return []enrich.Enricher{
 		attribution.New(),
 		basediff.NewWithOptions(basediffOptionsFor(opts, sourceOpts)),
-		untracked.New(),
-		cpe.New(),
+		untrackedEnricher,
+		cpeEnricher,
 	}
+}
+
+// buildLocalMatcher loads the offline-db catalogue into a
+// fingerprint matcher.
+func buildLocalMatcher(offlineDB string) (matcher.Matcher, error) {
+	m := matcher.NewLocalMatcher()
+	if err := m.LoadFromDir(offlineDB); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// refRequiresNetwork reports whether ref points at something that
+// needs an outbound network call to load.
+//
+// Heuristic: archive://, oci://, docker-daemon://, podman-daemon://,
+// or a path that exists on disk → no network. Everything else →
+// registry pull → network.
+func refRequiresNetwork(ref string) bool {
+	if ref == "" {
+		return false
+	}
+	for _, scheme := range []string{
+		"archive://", "oci://", "docker-daemon://", "podman-daemon://",
+	} {
+		if strings.HasPrefix(ref, scheme) {
+			return false
+		}
+	}
+	if _, err := os.Stat(ref); err == nil {
+		return false
+	}
+	return true
 }
 
 // basediffOptionsFor maps the CLI's --base flag to basediff.Options.

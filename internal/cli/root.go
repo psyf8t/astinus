@@ -113,6 +113,7 @@ Microsoft sbom-tool, …) and fill the gaps those tools leave behind.`,
 	cmd.AddCommand(newVersionCommand())
 	cmd.AddCommand(newCompletionCommand())
 	cmd.AddCommand(newEnrichCommand())
+	cmd.AddCommand(newOfflineDBCommand())
 
 	return cmd
 }
