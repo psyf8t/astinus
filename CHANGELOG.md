@@ -8,6 +8,35 @@ file is for cross-stage fixes that an operator might bisect against.
 
 ### Changed
 
+- basediff fallback mode now matches paths even on components with
+  no `LayerInfo`. Previously the enricher early-returned
+  `Origin=unknown` for any component without `LayerInfo`, which is
+  most of what Syft produces (Stage 3 attribution rarely stamps
+  Syft components). The fallback path-matcher now also reads file
+  paths from `syft:location:N:path` properties (not just
+  `Evidence.Locations`). On real Syft input every Origin slot
+  used to be `unknown`; with this fix path-based base/app
+  classification works without LayerInfo.
+  (post-Stage-13 hardening Task 3.1)
+- basediff downgrade emits a structured `basediff.fallback` warn
+  log with `reason`, `base_ref`, optional `error`, and `advice`
+  fields. Reasons cover `no-base-label`, `base-resolve-failed`,
+  `no-base-ref`, `base-pull-failed`, `compute-diff-failed`,
+  `layer-prefix-mismatch`. The `advice` field tells the operator
+  how to fix it (rebuild with the label, pre-pull the base, pass
+  `--base <ref>`). (post-Stage-13 hardening Task 3.2)
+
+### Added
+
+- New `ModePartial` for basediff. When the base image reference is
+  known (label or explicit) but the base image cannot be opened
+  (typical: `docker pull` not yet run, no daemon copy, network
+  refused), the enricher falls back to a heuristic — "every layer
+  except the last is base" — and stamps every component
+  `astinus:basediff:confidence=low` so the consumer can tell. The
+  prior failure mode was a complete `Origin=unknown` shutdown.
+  (post-Stage-13 hardening Task 3.3)
+
 - Untracked enricher now skips files that belong to packages already
   in the SBOM. Reads file paths from BOTH `Component.Evidence.Locations`
   AND Syft's `syft:location:N:path` properties (Syft does not populate

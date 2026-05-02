@@ -37,6 +37,15 @@ const (
 	ModeExplicit
 	// ModeNone skips basediff entirely (Origin stays empty).
 	ModeNone
+	// ModePartial is an internal-only fallback used when ModeAuto
+	// found a base reference in the labels but image.Open could not
+	// pull / read it. The enricher uses the target's own layer count
+	// as a heuristic ("base = every layer except the last") and
+	// stamps each component's `astinus:basediff:confidence=low` so
+	// the consumer can tell. Better than the all-Unknown failure
+	// mode this used to degrade to.
+	// post-Stage-13 hardening Task 3.
+	ModePartial
 )
 
 // Labels the auto-detector reads, in priority order. The first

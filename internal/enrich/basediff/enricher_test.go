@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/name"
@@ -124,6 +126,146 @@ func TestStampUnknownLeavesExistingOrigin(t *testing.T) {
 	}
 	if sbom.Components[1].Origin != model.OriginUnknown {
 		t.Errorf("blank Origin should become unknown, got %q", sbom.Components[1].Origin)
+	}
+}
+
+// TestStampOriginFallback_PathMatchesWithoutLayerInfo — the
+// post-Stage-13 hardening fix. Before, `originFor` returned
+// OriginUnknown for every component without LayerInfo, which is
+// most of what Syft produces. Now fallback mode falls through to
+// path matching even with LayerInfo == nil.
+func TestStampOriginFallback_PathMatchesWithoutLayerInfo(t *testing.T) {
+	sbom := &model.SBOM{Components: []model.Component{
+		// Syft-shaped: location in syft:location:N:path properties.
+		{
+			Name: "lodash",
+			Properties: map[string]string{
+				"syft:location:0:path": "/app/node_modules/lodash/package.json",
+			},
+		},
+		// Astinus-shaped: location in Evidence.Locations.
+		{
+			Name: "system-thing",
+			Evidence: &model.Evidence{Locations: []model.EvidenceLocation{
+				{Path: "/usr/lib/x86_64-linux-gnu/libc.so.6"},
+			}},
+		},
+		// Component without any path info — falls through to app.
+		{Name: "no-paths"},
+	}}
+	diff := (&fakeFallbackDiff{basePaths: map[string]bool{
+		"usr/lib/x86_64-linux-gnu/libc.so.6": true,
+	}}).into()
+
+	stampOrigin(sbom, diff)
+
+	if got := sbom.Components[0].Origin; got != model.OriginApplication {
+		t.Errorf("lodash (app code) = %q, want application", got)
+	}
+	if got := sbom.Components[1].Origin; got != model.OriginBaseImage {
+		t.Errorf("libc.so.6 (in base) = %q, want base-image", got)
+	}
+	if got := sbom.Components[2].Origin; got != model.OriginApplication {
+		t.Errorf("no-paths = %q, want application (no signal → app default)", got)
+	}
+}
+
+// TestPathsForComponent_ReadsBothShapes — the helper must surface
+// paths from BOTH Evidence.Locations and syft:location:N:path
+// properties. Mirrors the equivalent test in untracked/filter_test.
+func TestPathsForComponent_ReadsBothShapes(t *testing.T) {
+	c := &model.Component{
+		Evidence: &model.Evidence{
+			Locations: []model.EvidenceLocation{{Path: "/from/evidence"}},
+		},
+		Properties: map[string]string{
+			"syft:location:0:path":    "/from/syft-prop-0",
+			"syft:location:1:path":    "/from/syft-prop-1",
+			"syft:location:0:layerID": "sha256:cafebabe",
+			"syft:package:type":       "npm",
+		},
+	}
+	got := pathsForComponent(c)
+
+	want := map[string]bool{
+		"/from/evidence":    true,
+		"/from/syft-prop-0": true,
+		"/from/syft-prop-1": true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("paths = %v, want 3", got)
+	}
+	for _, p := range got {
+		if !want[p] {
+			t.Errorf("unexpected path %q", p)
+		}
+	}
+}
+
+// TestEnrichLogsFallbackWithReason — the diagnostic line operators
+// look for when basediff downgrades. Captures the slog default and
+// asserts the warn record carries reason + advice.
+func TestEnrichLogsFallbackWithReason(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	sbom := sampleSBOM()
+	img := buildImageWithLayers(t, layerOf("a", "1"))
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+
+	// ModeAuto + image with no labels → "no-base-label" fallback.
+	if err := New().Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"msg":"basediff.fallback"`) {
+		t.Errorf("missing basediff.fallback record: %s", out)
+	}
+	if !strings.Contains(out, `"reason":"no-base-label"`) {
+		t.Errorf("missing reason=no-base-label: %s", out)
+	}
+	if !strings.Contains(out, `"advice"`) {
+		t.Errorf("missing advice field: %s", out)
+	}
+}
+
+// TestStampOriginPartialStampsLowConfidence — when the partial-mode
+// helper is used, every component gets a confidence=low property
+// stamp so the consumer knows the basediff result is heuristic.
+func TestStampOriginPartialStampsLowConfidence(t *testing.T) {
+	sbom := &model.SBOM{Components: []model.Component{
+		{Name: "a", LayerInfo: &model.LayerInfo{LayerIndex: 0}},
+		{Name: "b", LayerInfo: &model.LayerInfo{LayerIndex: 5}},
+	}}
+	diff := (&fakePrefixDiff{prefix: 2}).into()
+	stampOriginWithMode(sbom, diff, ModePartial)
+
+	for _, c := range sbom.Components {
+		if c.Properties["astinus:basediff:confidence"] != "low" {
+			t.Errorf("component %q confidence = %q, want low",
+				c.Name, c.Properties["astinus:basediff:confidence"])
+		}
+	}
+}
+
+// TestModeStringCovers ensures every Mode value has a stable label
+// — exhaustive switch for the diffModeString style.
+func TestModeStringCovers(t *testing.T) {
+	cases := []struct {
+		m    Mode
+		want string
+	}{
+		{ModeAuto, "auto"},
+		{ModeExplicit, "explicit"},
+		{ModeNone, "none"},
+		{ModePartial, "partial"},
+	}
+	for _, c := range cases {
+		if got := modeString(c.m); got != c.want {
+			t.Errorf("modeString(%d) = %q, want %q", c.m, got, c.want)
+		}
 	}
 }
 
