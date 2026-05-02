@@ -163,7 +163,8 @@ The project is broken into 16 implementation stages. Current state:
 - ✅ **Stage 5**: Base image diff — auto-detects base from OCI labels, splits components into `base` / `app` / `unknown` via fast layer-prefix comparison with path-fallback for rebased images
 - ✅ **Stage 6**: CPE enrichment — bundled hand-curated PURL → CPE mapping with per-PURL-type heuristic fallback; validates existing CPEs; resolver chain ready for offline-DB and online matchers
 - ✅ **Stage 7**: SPDX 2.3 read/write — Astinus-typed fields round-trip via SPDX annotations; cross-format CDX↔SPDX with documented lossy areas; `--output-format spdx-json|spdx-tag-value`
-- ⬜ Stages 8–15 (next): Advanced auth, output formats, air-gapped mode, fingerprint matchers, policy framework, production polish
+- ✅ **Stage 8**: Daemon + OCI layout image sources — `oci://`, `docker-daemon://`, `podman-daemon://` schemes wired (Podman uses Docker Engine API + auto socket fallback); image-source factory now covers every reference shape
+- ⬜ Stages 9–15 (next): Advanced auth, output formats, air-gapped mode, fingerprint matchers, policy framework, production polish
 
 The full specification with stage details and acceptance criteria is currently maintained as a private working document.
  
