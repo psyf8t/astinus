@@ -27,8 +27,22 @@ file is for cross-stage fixes that an operator might bisect against.
   regular test suite. Discovered and fixed one real nil-pointer
   panic in the SPDX mapper (see Fixed below). (post-stage-13 review F-006)
 
+### Changed
+
+- ClearlyDefined dropped from the default matcher chain. Per
+  ADR-0015 §7 the Stage-13 ClearlyDefined matcher was a
+  coordinate-indexed stub that always returned `ErrNoMatch`;
+  wiring it cost a cache+rate-limit hop per lookup for nothing.
+  The matcher type stays in the package so a future PURL-based
+  resolver in the cpe chain can inhabit the slot.
+  (post-stage-13 review F-012)
+
 ### Fixed
 
+- SWH HTTP response body capped at 1 MiB before JSON decode
+  (`io.LimitReader`). Defensive against a hostile / misconfigured
+  intermediary returning a giant body. Real SWH responses are a
+  few KB. (post-stage-13 review F-017)
 - Software Heritage and ClearlyDefined matcher HTTP clients now
   share the same `transport.New(...)` `http.RoundTripper` as the
   registry source, inheriting the corporate CA bundle (`--ca-cert`),

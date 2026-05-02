@@ -13,7 +13,6 @@ package attribution
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"github.com/psyf8t/astinus/internal/image"
 	"github.com/psyf8t/astinus/internal/image/layer"
@@ -75,9 +74,6 @@ func defaultWalk(ctx context.Context, b *image.Bundle) (*layer.FileMap, error) {
 // the recursion through SubComponents stays cheap.
 type stamper struct {
 	fm *layer.FileMap
-	// once-locked: protects stats counters when (future) we
-	// parallelise stamping. Safe today because we run sequentially.
-	mu sync.Mutex //nolint:unused // reserved for future parallelism
 }
 
 // applyAll stamps every component in the slice (recursively into

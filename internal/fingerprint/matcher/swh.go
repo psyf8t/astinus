@@ -97,10 +97,17 @@ type swhContentResponse struct {
 	StatusURL string   `json:"status,omitempty"`
 }
 
+// maxSWHResponseBytes caps how much of an SWH response body we will
+// consume. Real SWH content responses are a few KB; 1 MiB is far
+// beyond anything plausible from the upstream API. Defensive cap
+// against a hostile / misconfigured intermediary returning a giant
+// body. post-stage-13 review F-017.
+const maxSWHResponseBytes = 1 << 20
+
 // parseSWHResponse builds a Match from a 200 response body.
 func parseSWHResponse(body io.Reader) (Match, error) {
 	var r swhContentResponse
-	if err := json.NewDecoder(body).Decode(&r); err != nil {
+	if err := json.NewDecoder(io.LimitReader(body, maxSWHResponseBytes)).Decode(&r); err != nil {
 		return Match{}, fmt.Errorf("swh: decode response: %w", err)
 	}
 	m := Match{Source: "swh"}

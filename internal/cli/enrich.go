@@ -417,13 +417,15 @@ func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.
 //
 //	[local from --offline-db when set]
 //	  → [SWH cached+rate-limited when --no-network is unset]
-//	  → [ClearlyDefined cached+rate-limited when --no-network is unset]
 //	  → matcher.Null
 //
-// Stage 13 ClearlyDefined is a diagnostic stub (see
-// matcher.ClearlyDefinedMatcher doc); we still wire it so the chain
-// shape is the one a future PURL-based ClearlyDefined integration
-// will inhabit.
+// ClearlyDefined was dropped from the default chain in
+// post-stage-13 review F-012 — the Stage-13 stub always returned
+// ErrNoMatch (CD is coordinate-indexed not hash-indexed; see
+// ADR-0015 §7), so wiring it cost a per-lookup cache+rate-limit
+// hop with zero chance of a hit. The matcher type still lives in
+// the matcher package; a future PURL-based ClearlyDefined resolver
+// in the cpe chain can inhabit the slot.
 func buildFingerprintMatcher(_ context.Context, opts *enrichOptions, tr http.RoundTripper) (matcher.Matcher, error) {
 	chain := matcher.NewChain()
 
@@ -456,15 +458,15 @@ func buildFingerprintMatcher(_ context.Context, opts *enrichOptions, tr http.Rou
 			),
 			matcher.CacheOptions{},
 		)
-		cd := matcher.NewCached(
-			matcher.NewRateLimited(
-				matcher.NewClearlyDefinedMatcher("", client),
-				matcher.RateLimitOptions{},
-			),
-			matcher.CacheOptions{},
-		)
 		chain.Append(swh)
-		chain.Append(cd)
+		// ClearlyDefined intentionally NOT wired into the default
+		// chain. Per ADR-0015 §7 the matcher is a coordinate-indexed
+		// stub that always returns ErrNoMatch; keeping it on the
+		// chain incurred a cache + rate-limit hop per untracked
+		// lookup with zero chance of a hit. The matcher type stays
+		// in the package so a future PURL-based ClearlyDefined
+		// resolver in the cpe chain can inhabit the slot.
+		// post-stage-13 review F-012.
 	}
 
 	chain.Append(matcher.Null)
