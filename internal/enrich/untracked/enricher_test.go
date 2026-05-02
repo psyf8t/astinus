@@ -14,6 +14,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
+	"github.com/psyf8t/astinus/internal/enrich/untracked/pathclassifier"
 	"github.com/psyf8t/astinus/internal/fingerprint"
 	"github.com/psyf8t/astinus/internal/fingerprint/matcher"
 	"github.com/psyf8t/astinus/internal/image"
@@ -106,6 +107,107 @@ func TestEnrichSkipsNoise(t *testing.T) {
 	}
 	if len(sbom.Components) != 0 {
 		t.Errorf("components = %d, want 0 (all noise)", len(sbom.Components))
+	}
+}
+
+// TestEnrichPathClassifierSkipsRuleMatch — PRSD-Task-1: a file that
+// matches a default classifier rule (here, /usr/share/zoneinfo/) is
+// dropped before the magic-byte classifier runs. Without the rule
+// the ELF magic at the front of the body would otherwise produce an
+// executable component.
+func TestEnrichPathClassifierSkipsRuleMatch(t *testing.T) {
+	body := []byte{0x7f, 'E', 'L', 'F', 0, 0, 0, 0, 1, 2, 3}
+	img := buildImage(t, map[string][]byte{
+		"usr/share/zoneinfo/America/New_York": body,
+	})
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+	if err := New().Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if len(sbom.Components) != 0 {
+		t.Errorf("components = %d, want 0 (zoneinfo rule must skip)", len(sbom.Components))
+	}
+}
+
+// TestEnrichPathClassifierCustomRulesFile — operator's --rules-file
+// can introduce a brand-new rule that drops a file the defaults
+// would have admitted.
+func TestEnrichPathClassifierCustomRulesFile(t *testing.T) {
+	customRules, err := pathclassifier.Load([]byte(`
+version: 1
+rules:
+  - name: vendor-internal
+    action: skip
+    pattern: {type: prefix, values: ["opt/internal/"]}
+    rationale: internal vendor binaries
+`))
+	if err != nil {
+		t.Fatalf("Load custom: %v", err)
+	}
+	defaults, _ := pathclassifier.LoadDefault()
+	classifier, err := pathclassifier.New(pathclassifier.Merge(defaults, customRules))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	img := buildImage(t, map[string][]byte{
+		"opt/internal/agent": {0x7f, 'E', 'L', 'F', 0, 0, 0, 0},
+		"opt/external/app":   {0x7f, 'E', 'L', 'F', 0, 0, 0, 0},
+	})
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+	e := NewWithOptions(Options{PathClassifier: classifier})
+	if err := e.Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if len(sbom.Components) != 1 {
+		t.Fatalf("components = %d, want 1 (only opt/external/app)", len(sbom.Components))
+	}
+	if sbom.Components[0].Evidence.Locations[0].Path != "opt/external/app" {
+		t.Errorf("kept the wrong file: %+v", sbom.Components[0])
+	}
+}
+
+// TestEnrichPathClassifierMarkAsNoiseStampsBypass — when the
+// classifier returns ActionMarkAsNoise and Include.IncludeNoise is
+// true, the file is recorded with `astinus:untracked:filter-bypass`
+// = `noise:<rule-name>` so consumers can see why.
+func TestEnrichPathClassifierMarkAsNoiseStampsBypass(t *testing.T) {
+	rules, err := pathclassifier.Load([]byte(`
+version: 1
+rules:
+  - name: marked-noise
+    action: mark_as_noise
+    pattern: {type: prefix, values: ["opt/marked/"]}
+    rationale: t
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	classifier, err := pathclassifier.New(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	img := buildImage(t, map[string][]byte{
+		"opt/marked/binary": {0x7f, 'E', 'L', 'F', 0, 0, 0, 0},
+	})
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+	e := NewWithOptions(Options{
+		PathClassifier: classifier,
+		Include:        IncludeMask{IncludeNoise: true},
+	})
+	if err := e.Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if len(sbom.Components) != 1 {
+		t.Fatalf("components = %d, want 1 (mark_as_noise + IncludeNoise)", len(sbom.Components))
+	}
+	bypass := sbom.Components[0].Properties["astinus:untracked:filter-bypass"]
+	if bypass != "noise:marked-noise" {
+		t.Errorf("bypass = %q, want noise:marked-noise", bypass)
 	}
 }
 

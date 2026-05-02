@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/psyf8t/astinus/internal/enrich/cpe"
 	"github.com/psyf8t/astinus/internal/enrich/dedup"
 	"github.com/psyf8t/astinus/internal/enrich/untracked"
+	"github.com/psyf8t/astinus/internal/enrich/untracked/pathclassifier"
 	"github.com/psyf8t/astinus/internal/fingerprint/matcher"
 	"github.com/psyf8t/astinus/internal/image"
 	"github.com/psyf8t/astinus/internal/image/auth"
@@ -67,6 +69,11 @@ type enrichOptions struct {
 	// metadata noise (LICENSE / README / *.h / *.map / ...).
 	// Debug only.
 	includeNoise bool
+	// rulesFile is an optional YAML file with custom path
+	// classification rules. Rules in the file are merged on top of
+	// the bundled defaults — same `name` overrides the default;
+	// new names are appended. PRSD-Task-1.
+	rulesFile string
 }
 
 func newEnrichCommand() *cobra.Command {
@@ -116,6 +123,8 @@ add the others.`,
 		"Record files inside already-known package directories (debug; default: skip)")
 	flags.BoolVar(&opts.includeNoise, "include-noise", false,
 		"Record LICENSE / README / locale / source / debug-symbol files (debug; default: skip)")
+	flags.StringVar(&opts.rulesFile, "rules-file", "",
+		"Path to YAML with custom path classification rules (merges over defaults)")
 
 	_ = cmd.MarkFlagRequired("sbom")
 	_ = cmd.MarkFlagRequired("image")
@@ -402,12 +411,17 @@ func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint matcher chain: %w", err)
 	}
+	classifier, err := buildPathClassifier(opts.rulesFile, logger)
+	if err != nil {
+		return nil, err
+	}
 	untrackedEnricher := untracked.NewWithOptions(untracked.Options{
 		Matcher: matcherChain,
 		Include: untracked.IncludeMask{
 			IncludeRedundant: opts.includeRedundant,
 			IncludeNoise:     opts.includeNoise,
 		},
+		PathClassifier: classifier,
 	})
 
 	cpeEnricher := cpe.New()
@@ -539,6 +553,39 @@ func refRequiresNetwork(ref string) bool {
 //	auto             → ModeAuto (default)
 //	none             → ModeNone (skip)
 //	anything else    → ModeExplicit, with the value as the reference
+//
+// buildPathClassifier loads the bundled default rules and (when
+// --rules-file was passed) merges the operator's overrides on top.
+// Returns a nil classifier if the merged rule set fails to compile —
+// today that's surfaced as an error so a misconfigured rules file
+// never silently degrades the scan.
+//
+// PRSD-Task-1.
+func buildPathClassifier(rulesPath string, logger *slog.Logger) (*pathclassifier.Classifier, error) {
+	defaults, err := pathclassifier.LoadDefault()
+	if err != nil {
+		return nil, fmt.Errorf("path classifier: load default rules: %w", err)
+	}
+	rules := defaults
+	if rulesPath != "" {
+		custom, err := pathclassifier.LoadFromPath(rulesPath)
+		if err != nil {
+			return nil, fmt.Errorf("--rules-file %q: %w", rulesPath, err)
+		}
+		rules = pathclassifier.Merge(defaults, custom)
+		logger.Info("untracked.rules.loaded",
+			"file", rulesPath,
+			"defaults", len(defaults),
+			"custom", len(custom),
+			"merged", len(rules))
+	}
+	c, err := pathclassifier.New(rules)
+	if err != nil {
+		return nil, fmt.Errorf("path classifier: compile rules: %w", err)
+	}
+	return c, nil
+}
+
 func basediffOptionsFor(opts *enrichOptions, sourceOpts []source.Option) basediff.Options {
 	switch strings.TrimSpace(opts.base) {
 	case "", "auto":

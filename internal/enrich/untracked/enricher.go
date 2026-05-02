@@ -38,6 +38,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/psyf8t/astinus/internal/enrich/untracked/pathclassifier"
 	"github.com/psyf8t/astinus/internal/fingerprint"
 	"github.com/psyf8t/astinus/internal/fingerprint/matcher"
 	"github.com/psyf8t/astinus/internal/image"
@@ -109,6 +110,13 @@ type Options struct {
 	// not in raising the issue rate. Zero → 16.
 	// post-Stage-13 hardening Task 4.
 	MatcherWorkers int
+
+	// PathClassifier is the declarative-rules classifier consulted
+	// in preFilter before the magic-byte classification path. Nil →
+	// the bundled default rules from pathclassifier.LoadDefault.
+	// Pass an explicitly-constructed *pathclassifier.Classifier to
+	// merge a `--rules-file` override on top. PRSD-Task-1.
+	PathClassifier *pathclassifier.Classifier
 }
 
 // Enricher implements enrich.Enricher.
@@ -139,6 +147,18 @@ func NewWithOptions(o Options) *Enricher {
 	if o.MatcherWorkers == 0 {
 		o.MatcherWorkers = 16
 	}
+	if o.PathClassifier == nil {
+		// Default-rule load failure is treated as "no classifier" —
+		// the magic-byte path still runs. Today LoadDefault never
+		// fails (the YAML is //go:embed-validated at build time);
+		// the soft fallback exists so a bad future edit cannot brick
+		// every Astinus call.
+		if rules, err := pathclassifier.LoadDefault(); err == nil {
+			if c, err := pathclassifier.New(rules); err == nil {
+				o.PathClassifier = c
+			}
+		}
+	}
 	return &Enricher{opts: o}
 }
 
@@ -152,7 +172,7 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 	}
 
 	idx := buildKnownIndex(sbom)
-	stats := scanStats{start: time.Now(), byCategory: map[string]int{}}
+	stats := newScanStats()
 
 	// Matcher tasks are queued by the visitor and processed in
 	// parallel AFTER the layer walk completes (so sbom.Components
@@ -278,10 +298,19 @@ type processResult struct {
 	ok       bool
 }
 
-// preFilter runs the redundancy + docs/metadata cheap pre-passes and
-// returns whether the visitor should skip this file. When the file is
-// kept under --include-redundant / --include-noise, returns the
-// reason string so the resulting Component can be stamped.
+// preFilter runs the redundancy + docs/metadata + declarative-rules
+// cheap pre-passes and returns whether the visitor should skip this
+// file. When the file is kept under --include-redundant /
+// --include-noise, returns the reason string so the resulting
+// Component can be stamped.
+//
+// The PathClassifier from PRSD-Task-1 runs LAST among the pre-pass
+// gates: redundancy and the file/extension catalogues are O(1) /
+// O(prefixes); the classifier's regex / glob fall-throughs are
+// slightly more expensive. The order also keeps the existing
+// Hardening-Sprint-1 instrumentation (`stats.redundant`,
+// `stats.noise`) intact for every file the legacy filters would
+// have caught.
 func (e *Enricher) preFilter(filePath string, idx *knownIndex, stats *scanStats) (reason string, skip bool) {
 	if isRedundantAgainstIndex(filePath, idx) {
 		stats.redundant++
@@ -299,11 +328,54 @@ func (e *Enricher) preFilter(filePath string, idx *knownIndex, stats *scanStats)
 			reason = "noise"
 		}
 	}
+	if reason == "" && e.opts.PathClassifier != nil {
+		if r, drop := e.applyPathClassifier(filePath, stats); drop {
+			return "", true
+		} else if r != "" {
+			reason = r
+		}
+	}
 	return reason, false
 }
 
+// applyPathClassifier consults the declarative classifier and
+// translates its Decision into the (reason, skip) shape preFilter
+// expects.
+//
+// PRSD-Task-1: ActionSkip / ActionRedundantUnderArchive both drop
+// the file (ActionRedundantUnderArchive will become Task-3 territory
+// once clustering lands; today both reduce to "do not record").
+// ActionMarkAsNoise / ActionMarkAsRedundant keep the file but stamp
+// the bypass property via the existing reason string.
+func (e *Enricher) applyPathClassifier(filePath string, stats *scanStats) (string, bool) {
+	d := e.opts.PathClassifier.Classify(filePath)
+	switch d.Action {
+	case pathclassifier.ActionSkip, pathclassifier.ActionRedundantUnderArchive:
+		stats.skippedByRule++
+		stats.byRule[d.RuleName]++
+		return "", true
+	case pathclassifier.ActionMarkAsNoise:
+		stats.noise++
+		if !e.opts.Include.allow(CategoryNoise) {
+			return "", true
+		}
+		stats.byRule[d.RuleName]++
+		return "noise:" + d.RuleName, false
+	case pathclassifier.ActionMarkAsRedundant:
+		stats.redundant++
+		if !e.opts.Include.allow(CategoryRedundant) {
+			return "", true
+		}
+		stats.byRule[d.RuleName]++
+		return "redundant:" + d.RuleName, false
+	default:
+		return "", false
+	}
+}
+
 // scanStats is the per-Enrich-call set of counters that drive the
-// `untracked.stats` log line. post-Stage-13 hardening Task 1 + Task 4.
+// `untracked.stats` log line. post-Stage-13 hardening Task 1 + Task 4
+// + PRSD-Task-1 (declarative-rules counters).
 type scanStats struct {
 	start             time.Time
 	scanned           int
@@ -311,7 +383,17 @@ type scanStats struct {
 	redundant         int
 	noise             int
 	skippedClassifier int
+	skippedByRule     int // PRSD-Task-1: pathclassifier hits
 	byCategory        map[string]int
+	byRule            map[string]int // PRSD-Task-1: per-rule hit count
+}
+
+func newScanStats() scanStats {
+	return scanStats{
+		start:      time.Now(),
+		byCategory: map[string]int{},
+		byRule:     map[string]int{},
+	}
 }
 
 func logScanStats(s scanStats, matcherHits int) {
@@ -326,7 +408,9 @@ func logScanStats(s scanStats, matcherHits int) {
 		"files_skipped_redundant", s.redundant,
 		"files_skipped_noise", s.noise,
 		"files_skipped_classifier", s.skippedClassifier,
+		"files_skipped_by_rule", s.skippedByRule,
 		"by_category", s.byCategory,
+		"by_rule", s.byRule,
 		"matcher_hits", matcherHits,
 		"duration_ms", dur.Milliseconds(),
 		"throughput_files_per_sec", int(throughput),
