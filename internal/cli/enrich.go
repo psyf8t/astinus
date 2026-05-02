@@ -13,6 +13,7 @@ import (
 
 	"github.com/psyf8t/astinus/internal/enrich"
 	"github.com/psyf8t/astinus/internal/enrich/attribution"
+	"github.com/psyf8t/astinus/internal/enrich/basediff"
 	"github.com/psyf8t/astinus/internal/enrich/untracked"
 	"github.com/psyf8t/astinus/internal/image"
 	"github.com/psyf8t/astinus/internal/image/source"
@@ -43,6 +44,7 @@ type enrichOptions struct {
 	insecure     bool
 	caBundle     string
 	skipTLS      bool
+	base         string // "auto" | "none" | <ref>
 }
 
 func newEnrichCommand() *cobra.Command {
@@ -78,6 +80,8 @@ add the others.`,
 	flags.BoolVar(&opts.skipTLS, "skip-tls-verify", false,
 		"Skip TLS verification (NOT recommended)")
 	flags.StringVar(&opts.caBundle, "ca-cert", "", "Path to a custom CA bundle (PEM)")
+	flags.StringVar(&opts.base, "base", "auto",
+		"Base image to diff against: auto|none|<ref>")
 
 	_ = cmd.MarkFlagRequired("sbom")
 	_ = cmd.MarkFlagRequired("image")
@@ -103,11 +107,12 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 		return newExitError(ExitImageAccess, err)
 	}
 
-	bundle, err := image.Open(ctx, opts.imageRef, sbom,
+	sourceOpts := []source.Option{
 		source.WithTransport(tr),
 		source.WithInsecure(opts.insecure),
 		source.WithPlatform(opts.platform),
-	)
+	}
+	bundle, err := image.Open(ctx, opts.imageRef, sbom, sourceOpts...)
 	if err != nil {
 		return newExitError(ExitImageAccess, err)
 	}
@@ -116,7 +121,7 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 	logger.Info("image.opened", "ref", bundle.Reference.String())
 
 	// ── Step 3: build & run the pipeline ───────────────────────────
-	pipeline := enrich.NewPipeline(logger, allEnrichers()...)
+	pipeline := enrich.NewPipeline(logger, allEnrichers(opts, sourceOpts)...)
 	pipeline = enrich.NewPipeline(logger, enrich.Filter(
 		pipeline.Enrichers(),
 		stringSliceToSet(opts.enable),
@@ -203,12 +208,33 @@ func buildTransport(opts *enrichOptions) (http.RoundTripper, error) {
 }
 
 // allEnrichers returns the canonical list of enrichers in execution
-// order. Stage 4 ships attribution + untracked; later stages slot in
-// basediff (between them) and cpe (at the end).
-func allEnrichers() []enrich.Enricher {
+// order. Stage 5 ships attribution → basediff → untracked. Stage 6
+// will append cpe at the end.
+func allEnrichers(opts *enrichOptions, sourceOpts []source.Option) []enrich.Enricher {
 	return []enrich.Enricher{
 		attribution.New(),
+		basediff.NewWithOptions(basediffOptionsFor(opts, sourceOpts)),
 		untracked.New(),
+	}
+}
+
+// basediffOptionsFor maps the CLI's --base flag to basediff.Options.
+//
+//	auto             → ModeAuto (default)
+//	none             → ModeNone (skip)
+//	anything else    → ModeExplicit, with the value as the reference
+func basediffOptionsFor(opts *enrichOptions, sourceOpts []source.Option) basediff.Options {
+	switch strings.TrimSpace(opts.base) {
+	case "", "auto":
+		return basediff.Options{Mode: basediff.ModeAuto, SourceOpts: sourceOpts}
+	case "none":
+		return basediff.Options{Mode: basediff.ModeNone}
+	default:
+		return basediff.Options{
+			Mode:       basediff.ModeExplicit,
+			Reference:  opts.base,
+			SourceOpts: sourceOpts,
+		}
 	}
 }
 

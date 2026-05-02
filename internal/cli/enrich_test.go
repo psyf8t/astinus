@@ -135,6 +135,105 @@ func TestEnrichRequiresFlags(t *testing.T) {
 	}
 }
 
+func TestEnrichBaseDiffStampsOrigin(t *testing.T) {
+	host, stop := startInMemoryRegistry(t)
+	defer stop()
+
+	base := buildLayeredImage(t,
+		map[string]string{"usr/bin/foo": "v1"},
+	)
+	pushImage(t, host, "team/base:v1", base)
+
+	// Build target by extending the SAME base image so the layer
+	// digests of base form a prefix of target.
+	extra, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(buildTar(t, map[string]string{"opt/app/main": "x"}))), nil
+	})
+	if err != nil {
+		t.Fatalf("LayerFromOpener: %v", err)
+	}
+	target, err := mutate.AppendLayers(base, extra)
+	if err != nil {
+		t.Fatalf("AppendLayers: %v", err)
+	}
+	pushImage(t, host, "team/app:v1", target)
+
+	dir := t.TempDir()
+	sbomPath := filepath.Join(dir, "sbom.cdx.json")
+	outPath := filepath.Join(dir, "out.cdx.json")
+
+	sbomBody := []byte(`{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "components": [
+    {
+      "bom-ref": "comp-foo",
+      "type": "library",
+      "name": "foo",
+      "version": "1.0",
+      "evidence": {"occurrences": [{"location": "/usr/bin/foo"}]}
+    },
+    {
+      "bom-ref": "comp-app",
+      "type": "application",
+      "name": "main",
+      "version": "1.0",
+      "evidence": {"occurrences": [{"location": "/opt/app/main"}]}
+    }
+  ]
+}`)
+	if err := os.WriteFile(sbomPath, sbomBody, 0o600); err != nil {
+		t.Fatalf("write sbom: %v", err)
+	}
+
+	root := newRootCommand(&rootOptions{})
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{
+		"enrich",
+		"--sbom", sbomPath,
+		"--image", host + "/team/app:v1",
+		"--insecure",
+		"--base", host + "/team/base:v1",
+		"--output", outPath,
+		"--output-format", "cyclonedx-json",
+		"--disable", "untracked", // keep the assertion focused
+	})
+	root.SetContext(context.Background())
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+
+	body, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+
+	var got struct {
+		Components []struct {
+			BOMRef     string                         `json:"bom-ref"`
+			Properties []struct{ Name, Value string } `json:"properties"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, body)
+	}
+
+	want := map[string]string{
+		"comp-foo": "base",
+		"comp-app": "app",
+	}
+	for _, c := range got.Components {
+		mp := propMap(c.Properties)
+		if mp["astinus:origin"] != want[c.BOMRef] {
+			t.Errorf("component %q origin = %q, want %q (props=%v)",
+				c.BOMRef, mp["astinus:origin"], want[c.BOMRef], mp)
+		}
+	}
+}
+
 func TestEnrichRejectsSPDXInput(t *testing.T) {
 	dir := t.TempDir()
 	sbomPath := filepath.Join(dir, "sbom.spdx.json")
