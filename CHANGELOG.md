@@ -6,6 +6,38 @@ file is for cross-stage fixes that an operator might bisect against.
 
 ## Unreleased
 
+### Performance
+
+- Untracked enricher now restricts the matcher chain (SWH /
+  ClearlyDefined / local) to high-value file categories
+  (Executable + Library) by default. Unknown / Script / Archive
+  files almost never match content-hash catalogues and previously
+  dominated wall-clock against rate-limited public APIs. New
+  `Options.MatcherInclude{Unknown,Scripts,Archives}` flags opt
+  back in for debug. Files smaller than
+  `Options.MatcherMinFileBytes` (default 4 KiB) are also skipped
+  — too small to be vendored binaries.
+  (post-Stage-13 hardening Task 4.1)
+- Untracked enricher's matcher.Lookup calls now run in a bounded
+  worker pool (`Options.MatcherWorkers`, default 16) AFTER the
+  layer walk completes, instead of being inlined synchronously
+  per file. The rate limiter still gates token acquisition; the
+  parallelism gain is in overlapping HTTP round-trip latency
+  (each SWH lookup is ~1–2 s of network time). Combined with the
+  category filter, this brings the with-network full-pipeline
+  wall-clock from **47 minutes (baseline) → 4 minutes 36
+  seconds** on the reference ~533 MiB Debian/Node.js image, well
+  under the 5-minute target. New per-Lookup `MatcherTimeout`
+  (default 5 s) caps a single slow SWH response.
+  (post-Stage-13 hardening Task 4.2)
+- Bumped matcher rate-limit defaults from 5/s burst 10 to 20/s
+  burst 30. The category filter caps total lookups at a few
+  hundred per scan, so even 20 req/s never sustains long enough
+  to risk a Software Heritage rate-limit ban.
+  (post-Stage-13 hardening Task 4.3)
+- Untracked stats log now includes `matcher_hits` so operators
+  can see how many lookups produced a real hit.
+
 ### Changed
 
 - CPE enricher now ALWAYS runs the resolver chain when a PURL is

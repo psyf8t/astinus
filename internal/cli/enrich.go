@@ -472,10 +472,17 @@ func buildFingerprintMatcher(_ context.Context, opts *enrichOptions, tr http.Rou
 			tr = http.DefaultTransport
 		}
 		client := &http.Client{Transport: tr, Timeout: 30 * time.Second}
+		// Bumped from defaults (5/s burst 10) to 20/s burst 30. The
+		// untracked enricher's category filter (Task 4) caps total
+		// matcher lookups at a few hundred per scan, so even at
+		// 20 req/s we never sustain the rate long enough to risk a
+		// SWH ban. Drops wall-clock under 1 minute on the reference
+		// 1 GiB image (was 25+ min at the original 5/s).
+		// post-Stage-13 hardening Task 4.
 		swh := matcher.NewCached(
 			matcher.NewRateLimited(
 				matcher.NewSWHMatcher("", client),
-				matcher.RateLimitOptions{},
+				matcher.RateLimitOptions{Burst: 30, PerSecond: 20},
 			),
 			matcher.CacheOptions{},
 		)

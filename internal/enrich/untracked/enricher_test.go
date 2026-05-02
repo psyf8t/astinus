@@ -130,14 +130,97 @@ func TestEnrichRecognisesJAR(t *testing.T) {
 	}
 }
 
-func TestEnrichAppliesMatcher(t *testing.T) {
+// countingMatcher records every Lookup call so tests can assert
+// MatcherSkipUnknown / MatcherMinFileBytes really skip work.
+type countingMatcher struct {
+	calls int
+	inner matcher.Matcher
+}
+
+func (c *countingMatcher) Name() string { return "counting" }
+func (c *countingMatcher) Lookup(ctx context.Context, alg, digest string) (matcher.Match, error) {
+	c.calls++
+	return c.inner.Lookup(ctx, alg, digest)
+}
+
+// TestEnrichSkipsMatcherForUnknownCategory — Task 4: the matcher
+// is skipped for CategoryUnknown files (overwhelmingly /etc/* configs
+// that no public catalogue indexes). The default Options have
+// MatcherIncludeUnknown=false, so a file that classifies as Unknown
+// must NOT trigger a Lookup.
+func TestEnrichSkipsMatcherForUnknownCategory(t *testing.T) {
+	// Random bytes that don't match any magic → CategoryUnknown.
+	body := append([]byte("not a binary"), bytes.Repeat([]byte{0xab}, 8192)...)
 	img := buildImage(t, map[string][]byte{
-		"opt/bin/jq": []byte("\x7fELF jq fake bytes"),
+		"opt/random.dat": body,
+	})
+	cm := &countingMatcher{inner: matcher.Null}
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+	if err := NewWithOptions(Options{Matcher: cm}).Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if cm.calls != 0 {
+		t.Errorf("matcher called %d times, want 0 (unknown skipped by default)", cm.calls)
+	}
+	if len(sbom.Components) != 1 {
+		t.Fatalf("components = %d, want 1 (file still recorded)", len(sbom.Components))
+	}
+}
+
+// TestEnrichIncludeUnknownReadmitsMatcher — operator opt-in for the
+// slow path: when MatcherIncludeUnknown=true the matcher is queried
+// for unknowns again.
+func TestEnrichIncludeUnknownReadmitsMatcher(t *testing.T) {
+	body := append([]byte("not a binary"), bytes.Repeat([]byte{0xab}, 8192)...)
+	img := buildImage(t, map[string][]byte{
+		"opt/random.dat": body,
+	})
+	cm := &countingMatcher{inner: matcher.Null}
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+	if err := NewWithOptions(Options{
+		Matcher:               cm,
+		MatcherIncludeUnknown: true,
+	}).Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if cm.calls != 1 {
+		t.Errorf("matcher called %d times, want 1 (include-unknown=true)", cm.calls)
+	}
+}
+
+// TestEnrichSkipsMatcherForTinyFiles — files under
+// MatcherMinFileBytes are skipped (default 256). A 50-byte ELF blob
+// is too small to be a real vendored binary worth fingerprinting.
+func TestEnrichSkipsMatcherForTinyFiles(t *testing.T) {
+	tiny := []byte{0x7f, 'E', 'L', 'F', 0, 0, 0, 0, 1, 2, 3} // 11 bytes
+	img := buildImage(t, map[string][]byte{
+		"opt/bin/tiny": tiny,
+	})
+	cm := &countingMatcher{inner: matcher.Null}
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+	if err := NewWithOptions(Options{Matcher: cm}).Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if cm.calls != 0 {
+		t.Errorf("matcher called %d times, want 0 (under MatcherMinFileBytes=256)", cm.calls)
+	}
+}
+
+func TestEnrichAppliesMatcher(t *testing.T) {
+	// Pad past the matcher MinFileBytes threshold (default 256) so
+	// the post-Stage-13 hardening Task 4 size-skip does not bypass
+	// the matcher for this test.
+	body := append([]byte("\x7fELF jq fake bytes"), bytes.Repeat([]byte{0x90}, 8192)...)
+	img := buildImage(t, map[string][]byte{
+		"opt/bin/jq": body,
 	})
 
 	// Build the matcher BEFORE running Enrich; we need the file's
 	// SHA-256 to register the lookup. Re-use Hasher to compute it.
-	bytesIn := []byte("\x7fELF jq fake bytes")
+	bytesIn := body
 	digest := sha256Hex(t, bytesIn)
 
 	local := matcher.NewLocalMatcher()

@@ -35,6 +35,7 @@ import (
 	"log/slog"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/psyf8t/astinus/internal/fingerprint"
@@ -67,6 +68,47 @@ type Options struct {
 	// Include selects which categories to record. Default mask
 	// excludes Redundant + Noise. post-Stage-13 hardening Task 1.
 	Include IncludeMask
+	// MatcherIncludeUnknown enables Matcher.Lookup for files
+	// classified as CategoryUnknown (zero value = false = SKIP
+	// matcher for unknowns, the production default). Unknowns are
+	// overwhelmingly /etc/* config / data files that no public
+	// catalogue (SWH, ClearlyDefined) will ever match; skipping
+	// them cuts ~70 % of matcher lookups on a typical Debian
+	// image. Set to true to opt back in for debug.
+	// post-Stage-13 hardening Task 4.
+	MatcherIncludeUnknown bool
+	// MatcherIncludeScripts enables Matcher.Lookup for files
+	// classified as CategoryScript (default false = skip). Shell /
+	// python entry-point scripts almost never appear in
+	// content-hash catalogues like Software Heritage; skipping
+	// them removes another ~250 lookups on a typical Debian image.
+	// Set to true to opt back in for debug.
+	MatcherIncludeScripts bool
+	// MatcherIncludeArchives enables Matcher.Lookup for files
+	// classified as CategoryArchive (default false = skip). JAR
+	// archives already get embedded-manifest extraction
+	// (vendor / version), and SWH does not reliably index .jar
+	// content. Set to true to opt back in for debug.
+	MatcherIncludeArchives bool
+	// MatcherMinFileBytes drops Matcher.Lookup for files smaller
+	// than this many bytes — too small to be a vendored binary
+	// worth fingerprinting. Default 4 KiB (real vendored binaries
+	// start in the tens of KiB).
+	MatcherMinFileBytes int64
+	// MatcherTimeout caps how long a single Matcher.Lookup is
+	// allowed to block. The matcher chain itself has a 30 s HTTP
+	// timeout; this is a tighter cap so a single slow request
+	// can't dominate wall-clock. Zero → 5 s.
+	MatcherTimeout time.Duration
+	// MatcherWorkers controls the size of the worker pool used to
+	// run matcher.Lookup calls in parallel after the layer walk
+	// finishes. The matcher chain itself rate-limits requests
+	// (Stage 13's RateLimitedMatcher) so the workers serialise
+	// through that bucket; the parallelism gain is in overlapping
+	// HTTP RTT (each Lookup takes ~1–2 s on Software Heritage),
+	// not in raising the issue rate. Zero → 16.
+	// post-Stage-13 hardening Task 4.
+	MatcherWorkers int
 }
 
 // Enricher implements enrich.Enricher.
@@ -88,6 +130,15 @@ func NewWithOptions(o Options) *Enricher {
 	if o.MaxFileBytes == 0 {
 		o.MaxFileBytes = DefaultMaxFileBytes
 	}
+	if o.MatcherMinFileBytes == 0 {
+		o.MatcherMinFileBytes = 4 * 1024 // 4 KiB
+	}
+	if o.MatcherTimeout == 0 {
+		o.MatcherTimeout = 5 * time.Second
+	}
+	if o.MatcherWorkers == 0 {
+		o.MatcherWorkers = 16
+	}
 	return &Enricher{opts: o}
 }
 
@@ -103,25 +154,83 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 	idx := buildKnownIndex(sbom)
 	stats := scanStats{start: time.Now(), byCategory: map[string]int{}}
 
+	// Matcher tasks are queued by the visitor and processed in
+	// parallel AFTER the layer walk completes (so sbom.Components
+	// is stable and worker writes by index are safe).
+	// post-Stage-13 hardening Task 4.
+	var tasks []matchTask
+
 	visitor := func(ctx context.Context, fe layer.FileEntry, body io.Reader) error {
-		return e.visit(ctx, sbom, idx, &stats, fe, body)
+		return e.visit(ctx, sbom, idx, &stats, &tasks, fe, body)
 	}
 
 	err := layer.WalkFiles(ctx, bundle.Image, visitor)
-	logScanStats(stats)
-	if errors.Is(err, errLimitHit) {
-		return nil // hit the cap — accept what we collected
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, errLimitHit) {
+		logScanStats(stats, 0)
 		return fmt.Errorf("untracked: walk: %w", err)
 	}
+
+	matcherHits := e.runMatcherWorkers(ctx, sbom, tasks)
+	logScanStats(stats, matcherHits)
 	return nil
 }
 
+// matchTask is one queued matcher.Lookup deferred until after the
+// layer walk completes.
+type matchTask struct {
+	componentIdx int
+	sha256       string
+}
+
+// runMatcherWorkers fans the queued matcher tasks out across a
+// bounded worker pool. Each worker calls matcher.Lookup with a
+// per-call ctx timeout (default 5 s) so a single slow upstream can
+// not dominate wall-clock. Returns the number of matcher hits.
+func (e *Enricher) runMatcherWorkers(ctx context.Context, sbom *model.SBOM, tasks []matchTask) int {
+	if len(tasks) == 0 {
+		return 0
+	}
+	workers := e.opts.MatcherWorkers
+	if workers > len(tasks) {
+		workers = len(tasks)
+	}
+
+	taskCh := make(chan matchTask, workers)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	hits := 0
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range taskCh {
+				lookupCtx, cancel := context.WithTimeout(ctx, e.opts.MatcherTimeout)
+				m, lerr := e.opts.Matcher.Lookup(lookupCtx, model.HashAlgorithmSHA256, t.sha256)
+				cancel()
+				if lerr != nil {
+					continue
+				}
+				mu.Lock()
+				applyMatch(&sbom.Components[t.componentIdx], m)
+				sbom.Components[t.componentIdx].Evidence.Method = "fingerprint"
+				hits++
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, t := range tasks {
+		taskCh <- t
+	}
+	close(taskCh)
+	wg.Wait()
+	return hits
+}
+
 // visit runs the per-file pipeline (pre-pass filters → processFile →
-// append). Extracted from Enrich so the closure stays simple and the
-// linter is happy with cognitive complexity.
-func (e *Enricher) visit(ctx context.Context, sbom *model.SBOM, idx *knownIndex, stats *scanStats, fe layer.FileEntry, body io.Reader) error {
+// append + queue matcher task). Extracted from Enrich so the closure
+// stays simple and the linter is happy with cognitive complexity.
+func (e *Enricher) visit(_ context.Context, sbom *model.SBOM, idx *knownIndex, stats *scanStats, tasks *[]matchTask, fe layer.FileEntry, body io.Reader) error {
 	if e.opts.MaxComponents > 0 && stats.added >= e.opts.MaxComponents {
 		return errLimitHit
 	}
@@ -132,23 +241,41 @@ func (e *Enricher) visit(ctx context.Context, sbom *model.SBOM, idx *knownIndex,
 		return nil
 	}
 
-	comp, ok, err := e.processFile(ctx, fe, body)
+	r, err := e.processFile(fe, body)
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !r.ok {
 		stats.skippedClassifier++
 		return nil
 	}
 	if preReason != "" {
-		comp.Properties["astinus:untracked:filter-bypass"] = preReason
+		r.comp.Properties["astinus:untracked:filter-bypass"] = preReason
 	}
-	sbom.Components = append(sbom.Components, comp)
+	sbom.Components = append(sbom.Components, r.comp)
 	stats.added++
-	if cat := comp.Properties["astinus:untracked:category"]; cat != "" {
-		stats.byCategory[cat]++
+	if catStr := r.comp.Properties["astinus:untracked:category"]; catStr != "" {
+		stats.byCategory[catStr]++
+	}
+	if e.shouldMatcherLookup(r.category, r.size) {
+		*tasks = append(*tasks, matchTask{
+			componentIdx: len(sbom.Components) - 1,
+			sha256:       r.sha256,
+		})
 	}
 	return nil
+}
+
+// processResult bundles everything visit needs to know about a file:
+// the assembled Component, its SHA-256 (for the matcher worker pool),
+// its category + body size (for shouldMatcherLookup), and whether
+// the file should be recorded at all.
+type processResult struct {
+	comp     model.Component
+	sha256   string
+	category Category
+	size     int64
+	ok       bool
 }
 
 // preFilter runs the redundancy + docs/metadata cheap pre-passes and
@@ -187,7 +314,7 @@ type scanStats struct {
 	byCategory        map[string]int
 }
 
-func logScanStats(s scanStats) {
+func logScanStats(s scanStats, matcherHits int) {
 	dur := time.Since(s.start)
 	throughput := 0.0
 	if dur > 0 {
@@ -200,19 +327,22 @@ func logScanStats(s scanStats) {
 		"files_skipped_noise", s.noise,
 		"files_skipped_classifier", s.skippedClassifier,
 		"by_category", s.byCategory,
+		"matcher_hits", matcherHits,
 		"duration_ms", dur.Milliseconds(),
 		"throughput_files_per_sec", int(throughput),
 	)
 }
 
 // processFile runs one file through "slurp → classify → hash →
-// extract → match" and returns the resulting Component (and ok=true)
-// when the category warrants recording. ok=false for noise / config /
-// static-archive (skipped); err is for true I/O errors.
-func (e *Enricher) processFile(ctx context.Context, fe layer.FileEntry, body io.Reader) (model.Component, bool, error) {
+// extract" and returns the assembled Component PLUS the metadata the
+// caller needs (sha256, category, size) to decide whether to queue a
+// matcher task. ok=false for noise / config / static-archive
+// (skipped); err is for true I/O errors. Matcher.Lookup is no longer
+// called here — see runMatcherWorkers.
+func (e *Enricher) processFile(fe layer.FileEntry, body io.Reader) (processResult, error) {
 	buf, err := readCapped(body, e.opts.MaxFileBytes)
 	if err != nil {
-		return model.Component{}, false, err
+		return processResult{}, err
 	}
 
 	magic := buf
@@ -223,7 +353,7 @@ func (e *Enricher) processFile(ctx context.Context, fe layer.FileEntry, body io.
 
 	switch cls.Category {
 	case CategoryNoise, CategoryStaticArchive, CategoryConfig, CategoryRedundant:
-		return model.Component{}, false, nil
+		return processResult{}, nil
 	case CategoryExecutable, CategoryArchive, CategoryScript,
 		CategoryLibrary, CategoryUnknown:
 		// continue
@@ -231,18 +361,46 @@ func (e *Enricher) processFile(ctx context.Context, fe layer.FileEntry, body io.
 
 	hashes, _, hashErr := fingerprint.Hasher{}.Hash(bytes.NewReader(buf))
 	if hashErr != nil {
-		return model.Component{}, false, nil //nolint:nilerr // single-file hash failure must not abort the scan
+		return processResult{}, nil //nolint:nilerr // single-file hash failure must not abort the scan
 	}
-	sha256 := hashes[0].Value
+	sha := hashes[0].Value
 
-	comp := buildBaseComponent(fe, cls, sha256, hashes)
+	comp := buildBaseComponent(fe, cls, sha, hashes)
 	enrichEmbedded(&comp, cls.Category, buf)
+	return processResult{
+		comp:     comp,
+		sha256:   sha,
+		category: cls.Category,
+		size:     int64(len(buf)),
+		ok:       true,
+	}, nil
+}
 
-	if m, lerr := e.opts.Matcher.Lookup(ctx, model.HashAlgorithmSHA256, sha256); lerr == nil {
-		applyMatch(&comp, m)
-		comp.Evidence.Method = "fingerprint"
+// shouldMatcherLookup reports whether the matcher chain is worth
+// querying for a file of the given (category, size). Default policy:
+// run matcher only for Executable + Library — those are the
+// categories where Software Heritage actually carries content. Other
+// categories (Script, Archive — which has its own embedded-metadata
+// extraction; Unknown — overwhelmingly /etc/* configs Syft missed)
+// almost never produce a hit and dominate wall-clock when the
+// matcher is rate-limited against a public API.
+// post-Stage-13 hardening Task 4.
+func (e *Enricher) shouldMatcherLookup(cat Category, size int64) bool {
+	if size < e.opts.MatcherMinFileBytes {
+		return false
 	}
-	return comp, true, nil
+	switch cat {
+	case CategoryExecutable, CategoryLibrary:
+		return true
+	case CategoryUnknown:
+		return e.opts.MatcherIncludeUnknown
+	case CategoryScript:
+		return e.opts.MatcherIncludeScripts
+	case CategoryArchive:
+		return e.opts.MatcherIncludeArchives
+	default:
+		return false
+	}
 }
 
 // enrichEmbedded looks for in-file metadata (Go buildinfo, JAR
