@@ -13,6 +13,7 @@ import (
 
 	"github.com/psyf8t/astinus/internal/enrich"
 	"github.com/psyf8t/astinus/internal/enrich/attribution"
+	"github.com/psyf8t/astinus/internal/enrich/untracked"
 	"github.com/psyf8t/astinus/internal/image"
 	"github.com/psyf8t/astinus/internal/image/source"
 	"github.com/psyf8t/astinus/internal/image/transport"
@@ -202,11 +203,12 @@ func buildTransport(opts *enrichOptions) (http.RoundTripper, error) {
 }
 
 // allEnrichers returns the canonical list of enrichers in execution
-// order. Stage 3 only ships attribution; later stages append basediff,
-// untracked, cpe.
+// order. Stage 4 ships attribution + untracked; later stages slot in
+// basediff (between them) and cpe (at the end).
 func allEnrichers() []enrich.Enricher {
 	return []enrich.Enricher{
 		attribution.New(),
+		untracked.New(),
 	}
 }
 
