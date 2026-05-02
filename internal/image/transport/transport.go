@@ -69,6 +69,12 @@ type Options struct {
 
 	// Logger receives debug events about retries. Nil = silent.
 	Logger *slog.Logger
+
+	// ClientCert / ClientKey form a PEM-encoded mTLS client
+	// certificate. Both must be set or both empty. Per spec
+	// section 9.4 (mTLS for high-security environments).
+	ClientCert string
+	ClientKey  string
 }
 
 // defaultTimeout is applied when Options.Timeout is zero.
@@ -140,8 +146,9 @@ func (u *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error
 	return u.base.RoundTrip(req)
 }
 
-// buildTLSConfig honours opts.CABundle and opts.SkipTLSVerify and
-// returns a *tls.Config suitable for an http.Transport.
+// buildTLSConfig honours opts.CABundle, opts.SkipTLSVerify, and
+// opts.ClientCert/Key, and returns a *tls.Config suitable for an
+// http.Transport.
 func buildTLSConfig(opts Options) (*tls.Config, error) {
 	pool, err := loadCAPool(opts.CABundle)
 	if err != nil {
@@ -153,6 +160,13 @@ func buildTLSConfig(opts Options) (*tls.Config, error) {
 	}
 	if opts.SkipTLSVerify {
 		cfg.InsecureSkipVerify = true //nolint:gosec // explicit opt-in via Options
+	}
+	clientCert, err := loadClientCertificate(opts.ClientCert, opts.ClientKey)
+	if err != nil {
+		return nil, err
+	}
+	if hasClientCert(clientCert) {
+		cfg.Certificates = []tls.Certificate{clientCert}
 	}
 	return cfg, nil
 }

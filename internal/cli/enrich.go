@@ -11,12 +11,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	cfgpkg "github.com/psyf8t/astinus/internal/config"
 	"github.com/psyf8t/astinus/internal/enrich"
 	"github.com/psyf8t/astinus/internal/enrich/attribution"
 	"github.com/psyf8t/astinus/internal/enrich/basediff"
 	"github.com/psyf8t/astinus/internal/enrich/cpe"
 	"github.com/psyf8t/astinus/internal/enrich/untracked"
 	"github.com/psyf8t/astinus/internal/image"
+	"github.com/psyf8t/astinus/internal/image/auth"
 	"github.com/psyf8t/astinus/internal/image/source"
 	"github.com/psyf8t/astinus/internal/image/transport"
 	"github.com/psyf8t/astinus/internal/output"
@@ -47,6 +49,7 @@ type enrichOptions struct {
 	caBundle     string
 	skipTLS      bool
 	base         string // "auto" | "none" | <ref>
+	configPath   string // copied from root --config in RunE
 }
 
 func newEnrichCommand() *cobra.Command {
@@ -62,6 +65,10 @@ Stage 3 ships only the layer-attribution enricher; subsequent stages
 add the others.`,
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
+			// --config is a persistent root flag; pull it through.
+			if f := c.Flag("config"); f != nil {
+				opts.configPath = f.Value.String()
+			}
 			return runEnrich(c.Context(), c.OutOrStdout(), opts)
 		},
 	}
@@ -104,13 +111,19 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 	)
 
 	// ── Step 2: open the image ─────────────────────────────────────
-	tr, err := buildTransport(opts)
+	cfg, err := loadConfigIfPresent(opts.configPath)
+	if err != nil {
+		return newExitError(ExitInvalidArgs, err)
+	}
+
+	tr, err := buildTransport(opts, cfg)
 	if err != nil {
 		return newExitError(ExitImageAccess, err)
 	}
 
 	sourceOpts := []source.Option{
 		source.WithTransport(tr),
+		source.WithCredentials(buildAuthChain(cfg)),
 		source.WithInsecure(opts.insecure),
 		source.WithPlatform(opts.platform),
 	}
@@ -198,15 +211,118 @@ func loadSBOM(path string) (*model.SBOM, error) {
 
 // buildTransport returns the http.RoundTripper configured for this
 // enrich invocation.
-func buildTransport(opts *enrichOptions) (http.RoundTripper, error) {
-	rt, err := transport.New(transport.Options{
+//
+// Per ADR-0012: the default transport reflects CLI flags + global
+// config; per-registry overrides come from cfg.Registries[i].TLS.
+// When the YAML carries any per-registry TLS, we wrap the default
+// in transport.PerRegistry and dispatch by host.
+func buildTransport(opts *enrichOptions, cfg *cfgpkg.Config) (http.RoundTripper, error) {
+	def, err := transport.New(transport.Options{
 		CABundle:      opts.caBundle,
 		SkipTLSVerify: opts.skipTLS,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("transport: %w", err)
 	}
-	return rt, nil
+	if cfg == nil || !cfg.HasPerRegistryTLS() {
+		return def, nil
+	}
+	return buildPerRegistryTransport(def, cfg)
+}
+
+// buildPerRegistryTransport adds one per-host transport for every
+// registry that carries TLS or Insecure config.
+func buildPerRegistryTransport(def http.RoundTripper, cfg *cfgpkg.Config) (http.RoundTripper, error) {
+	pr, err := transport.NewPerRegistry(def)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range cfg.Registries {
+		if r.TLS == nil && !r.Insecure && r.Proxy == "" {
+			continue
+		}
+		o := transport.Options{}
+		if r.TLS != nil {
+			o.CABundle = r.TLS.CACert
+			o.SkipTLSVerify = r.TLS.SkipVerify
+			o.ClientCert = r.TLS.ClientCert
+			o.ClientKey = r.TLS.ClientKey
+		}
+		if r.Proxy != "" {
+			o.Proxy = r.Proxy
+		}
+		hostRT, err := transport.New(o)
+		if err != nil {
+			return nil, fmt.Errorf("transport: per-registry %q: %w", r.Host, err)
+		}
+		pr.Set(r.Host, hostRT)
+	}
+	return pr, nil
+}
+
+// loadConfigIfPresent loads cfg from path. Empty path returns nil
+// (no config is fine; callers MUST nil-check the result).
+func loadConfigIfPresent(path string) (*cfgpkg.Config, error) {
+	if path == "" {
+		return nil, nil //nolint:nilnil // empty path legitimately means "no config"
+	}
+	cfg, err := cfgpkg.Load(path)
+	if err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	return cfg, nil
+}
+
+// buildAuthChain assembles the credential chain. Per-registry auth
+// blocks become Artifactory providers (the only typed cloud provider
+// today); everything else falls back to DefaultChain.
+func buildAuthChain(cfg *cfgpkg.Config) auth.CredentialProvider {
+	chain := auth.NewChain()
+	if cfg != nil {
+		for _, r := range cfg.Registries {
+			if r.Auth == nil {
+				continue
+			}
+			if p := authProviderForRegistry(r); p != nil {
+				chain.Append(p)
+			}
+		}
+	}
+	for _, p := range auth.DefaultChain().Providers() {
+		chain.Append(p)
+	}
+	return chain
+}
+
+// authProviderForRegistry maps the YAML auth.type onto a typed
+// provider. Unknown types are skipped silently — DefaultChain still
+// gets to try its env / docker-config providers.
+func authProviderForRegistry(r cfgpkg.RegistryConfig) auth.CredentialProvider {
+	if r.Auth == nil {
+		return nil
+	}
+	switch r.Auth.Type {
+	case "artifactory-token":
+		return auth.NewArtifactoryProvider(auth.ArtifactoryConfig{
+			Mode:     auth.ArtifactoryToken,
+			Hosts:    []string{r.Host},
+			TokenEnv: r.Auth.TokenEnv,
+		})
+	case "artifactory-api-key":
+		return auth.NewArtifactoryProvider(auth.ArtifactoryConfig{
+			Mode:      auth.ArtifactoryAPIKey,
+			Hosts:     []string{r.Host},
+			UserEnv:   r.Auth.UsernameEnv,
+			APIKeyEnv: r.Auth.APIKeyEnv,
+		})
+	case "artifactory-oidc":
+		return auth.NewArtifactoryProvider(auth.ArtifactoryConfig{
+			Mode:         auth.ArtifactoryOIDC,
+			Hosts:        []string{r.Host},
+			OIDCTokenEnv: r.Auth.OIDCTokenEnv,
+		})
+	}
+	return nil
 }
 
 // allEnrichers returns the canonical list of enrichers in execution
