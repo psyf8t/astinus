@@ -155,7 +155,7 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 	logger.Info("image.opened", "ref", bundle.Reference.String())
 
 	// ── Step 3: build & run the pipeline ───────────────────────────
-	enrichers, err := allEnrichers(ctx, opts, sourceOpts)
+	enrichers, err := allEnrichers(ctx, opts, sourceOpts, tr)
 	if err != nil {
 		// --offline-db / matcher-chain build failures must not be
 		// silently dropped — air-gapped CI must fail loudly when
@@ -382,10 +382,10 @@ func authProviderForRegistry(r cfgpkg.RegistryConfig) auth.CredentialProvider {
 // CPE-chain loader cannot read; air-gapped CI must surface that
 // rather than silently fall back to default chains. post-stage-13
 // review F-011.
-func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.Option) ([]enrich.Enricher, error) {
+func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.Option, tr http.RoundTripper) ([]enrich.Enricher, error) {
 	logger := LoggerFrom(ctx)
 
-	matcherChain, err := buildFingerprintMatcher(ctx, opts)
+	matcherChain, err := buildFingerprintMatcher(ctx, opts, tr)
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint matcher chain: %w", err)
 	}
@@ -424,7 +424,7 @@ func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.
 // matcher.ClearlyDefinedMatcher doc); we still wire it so the chain
 // shape is the one a future PURL-based ClearlyDefined integration
 // will inhabit.
-func buildFingerprintMatcher(_ context.Context, opts *enrichOptions) (matcher.Matcher, error) {
+func buildFingerprintMatcher(_ context.Context, opts *enrichOptions, tr http.RoundTripper) (matcher.Matcher, error) {
 	chain := matcher.NewChain()
 
 	if opts.offlineDB != "" {
@@ -440,7 +440,15 @@ func buildFingerprintMatcher(_ context.Context, opts *enrichOptions) (matcher.Ma
 	}
 
 	if !opts.noNetwork {
-		client := &http.Client{Timeout: 30 * time.Second}
+		// Share the configured transport (corporate CA / mTLS /
+		// retry / UA stamp) with the matcher HTTP clients. Falling
+		// back to a bare http.DefaultTransport inside an explicit
+		// http.Client wrapped only the request timeout —
+		// post-stage-13 review F-009.
+		if tr == nil {
+			tr = http.DefaultTransport
+		}
+		client := &http.Client{Transport: tr, Timeout: 30 * time.Second}
 		swh := matcher.NewCached(
 			matcher.NewRateLimited(
 				matcher.NewSWHMatcher("", client),

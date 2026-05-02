@@ -29,6 +29,14 @@ file is for cross-stage fixes that an operator might bisect against.
 
 ### Fixed
 
+- Software Heritage and ClearlyDefined matcher HTTP clients now
+  share the same `transport.New(...)` `http.RoundTripper` as the
+  registry source, inheriting the corporate CA bundle (`--ca-cert`),
+  mTLS client cert, retry policy, and `astinus/<version>` User-Agent
+  stamp. Previously the matchers built a bare `&http.Client{Timeout: 30s}`
+  that bypassed the project's transport configuration, so SWH /
+  ClearlyDefined lookups failed on TLS-intercepting corporate
+  proxies even when registry pulls worked. (post-stage-13 review F-009)
 - `--offline-db` load failures now surface as `ExitInvalidArgs`
   instead of silently disabling the local matcher / CPE chain.
   Air-gapped CI was previously vulnerable to a typo in the path
