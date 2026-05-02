@@ -144,6 +144,7 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 		source.WithCredentials(buildAuthChain(cfg)),
 		source.WithInsecure(opts.insecure),
 		source.WithPlatform(opts.platform),
+		source.WithLogger(logger),
 	}
 	bundle, err := image.Open(ctx, opts.imageRef, sbom, sourceOpts...)
 	if err != nil {

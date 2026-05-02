@@ -1,6 +1,7 @@
 package source
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/psyf8t/astinus/internal/image/auth"
@@ -27,6 +28,18 @@ type Options struct {
 	// This is independent of TLS verification (which is configured
 	// on Transport).
 	Insecure bool
+
+	// Logger receives auto-detection trace records (debug-level for
+	// each probe attempt, info-level when a source is selected). Nil
+	// means slog.Default(), so the package always has a usable
+	// destination.
+	Logger *slog.Logger
+
+	// daemonProber is the seam used by autoDetect to decide whether
+	// the local Docker / Podman daemon owns ref. Unexported because
+	// only tests inject a fake; production always uses the real
+	// pkg/v1/daemon-backed prober.
+	daemonProber daemonProber
 }
 
 // Option mutates Options. Used by FromReference and friends to keep
@@ -53,10 +66,28 @@ func WithInsecure(v bool) Option {
 	return func(o *Options) { o.Insecure = v }
 }
 
+// WithLogger sets Options.Logger. The factory uses it for
+// auto-detection trace records; the source implementations themselves
+// do not log (the caller's pipeline already wraps them).
+func WithLogger(l *slog.Logger) Option {
+	return func(o *Options) { o.Logger = l }
+}
+
+// withDaemonProber injects a fake prober. Test-only; not exported.
+func withDaemonProber(p daemonProber) Option {
+	return func(o *Options) { o.daemonProber = p }
+}
+
 func applyOptions(opts []Option) Options {
 	o := Options{}
 	for _, fn := range opts {
 		fn(&o)
+	}
+	if o.Logger == nil {
+		o.Logger = slog.Default()
+	}
+	if o.daemonProber == nil {
+		o.daemonProber = realDaemonProber{}
 	}
 	return o
 }

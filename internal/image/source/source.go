@@ -16,14 +16,21 @@
 //	archive://path/to.tar            // explicit archive
 //	oci://path/to/layout             // explicit OCI layout (Stage 8)
 //
-// Auto-detection rules (when no scheme is given):
+// Auto-detection rules (when no scheme is given), in priority order:
 //
-//  1. If the string parses as a valid registry reference, use the
-//     registry source.
-//  2. If the string is an existing file and looks like a tar archive,
-//     use the archive source.
-//  3. If the string is an existing directory containing index.json,
-//     use the OCI layout source (Stage 8).
+//  1. If the string is an existing file → archive source.
+//  2. If the string is an existing directory with index.json +
+//     oci-layout marker → OCI layout source.
+//  3. If the string parses as an image reference AND the local
+//     Docker daemon owns it → docker-daemon source. (ADR-0017)
+//  4. If the string parses as an image reference AND the local
+//     Podman daemon owns it → podman-daemon source. (ADR-0017)
+//  5. If the string parses as an image reference → registry source
+//     (fallback).
+//
+// Each daemon probe is gated by a cheap socket-existence check, so
+// auto-detection never blocks waiting for a daemon that isn't there;
+// the probe itself is bounded by a 2 s context deadline.
 package source
 
 import (
