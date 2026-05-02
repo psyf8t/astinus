@@ -56,22 +56,6 @@ type ImageSource interface {
 	Close() error
 }
 
-// Bundle pairs an ImageSource with its loaded v1.Image. Enrichers
-// receive a *Bundle so they don't have to repeat the source.Image()
-// call (which may be expensive on its first invocation).
-type Bundle struct {
-	Source ImageSource
-	Image  v1.Image
-}
-
-// Close releases the underlying source. Image is left to the GC.
-func (b *Bundle) Close() error {
-	if b == nil || b.Source == nil {
-		return nil
-	}
-	return b.Source.Close()
-}
-
 // ErrNotFound is returned by sources when the requested image cannot
 // be located (registry 404, missing file, missing tag in archive).
 var ErrNotFound = errors.New("source: image not found")
