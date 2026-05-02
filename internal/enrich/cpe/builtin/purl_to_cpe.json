@@ -1,0 +1,70 @@
+{
+  "schema": "astinus.cpe.bundled-mapping/1",
+  "snapshot": "2026-05-02",
+  "source": "hand-curated subset; full NVD CPE Dictionary loader lands in Stage 12",
+  "entries": [
+    {"purl_type": "npm", "purl_name": "express", "vendor": "expressjs", "product": "express"},
+    {"purl_type": "npm", "purl_name": "lodash", "vendor": "lodash", "product": "lodash"},
+    {"purl_type": "npm", "purl_name": "axios", "vendor": "axios", "product": "axios"},
+    {"purl_type": "npm", "purl_name": "react", "vendor": "facebook", "product": "react"},
+    {"purl_type": "npm", "purl_name": "vue", "vendor": "vuejs", "product": "vue.js"},
+    {"purl_type": "npm", "purl_name": "next", "vendor": "vercel", "product": "next.js"},
+    {"purl_type": "npm", "purl_name": "moment", "vendor": "momentjs", "product": "moment"},
+    {"purl_type": "npm", "purl_name": "minimatch", "vendor": "isaacs", "product": "minimatch"},
+    {"purl_type": "npm", "purl_name": "qs", "vendor": "ljharb", "product": "qs"},
+    {"purl_type": "npm", "purl_name": "ws", "vendor": "websockets", "product": "ws"},
+
+    {"purl_type": "pypi", "purl_name": "django", "vendor": "djangoproject", "product": "django"},
+    {"purl_type": "pypi", "purl_name": "flask", "vendor": "palletsprojects", "product": "flask"},
+    {"purl_type": "pypi", "purl_name": "requests", "vendor": "python-requests", "product": "requests"},
+    {"purl_type": "pypi", "purl_name": "urllib3", "vendor": "urllib3_project", "product": "urllib3"},
+    {"purl_type": "pypi", "purl_name": "pyyaml", "vendor": "pyyaml", "product": "pyyaml"},
+    {"purl_type": "pypi", "purl_name": "jinja2", "vendor": "palletsprojects", "product": "jinja"},
+    {"purl_type": "pypi", "purl_name": "numpy", "vendor": "numpy", "product": "numpy"},
+    {"purl_type": "pypi", "purl_name": "pandas", "vendor": "pandas", "product": "pandas"},
+    {"purl_type": "pypi", "purl_name": "pillow", "vendor": "python", "product": "pillow"},
+    {"purl_type": "pypi", "purl_name": "cryptography", "vendor": "cryptography_project", "product": "cryptography"},
+
+    {"purl_type": "maven", "purl_namespace": "org.apache.logging.log4j", "purl_name": "log4j-core", "vendor": "apache", "product": "log4j"},
+    {"purl_type": "maven", "purl_namespace": "org.apache.logging.log4j", "purl_name": "log4j-api", "vendor": "apache", "product": "log4j"},
+    {"purl_type": "maven", "purl_namespace": "org.apache.commons", "purl_name": "commons-lang3", "vendor": "apache", "product": "commons_lang"},
+    {"purl_type": "maven", "purl_namespace": "org.springframework", "purl_name": "spring-core", "vendor": "vmware", "product": "spring_framework"},
+    {"purl_type": "maven", "purl_namespace": "org.springframework", "purl_name": "spring-web", "vendor": "vmware", "product": "spring_framework"},
+    {"purl_type": "maven", "purl_namespace": "org.springframework.boot", "purl_name": "spring-boot", "vendor": "vmware", "product": "spring_boot"},
+    {"purl_type": "maven", "purl_namespace": "com.fasterxml.jackson.core", "purl_name": "jackson-databind", "vendor": "fasterxml", "product": "jackson-databind"},
+    {"purl_type": "maven", "purl_namespace": "org.postgresql", "purl_name": "postgresql", "vendor": "postgresql", "product": "postgresql_jdbc_driver"},
+    {"purl_type": "maven", "purl_namespace": "mysql", "purl_name": "mysql-connector-java", "vendor": "oracle", "product": "mysql_connector\\/j"},
+    {"purl_type": "maven", "purl_namespace": "io.netty", "purl_name": "netty-all", "vendor": "netty", "product": "netty"},
+
+    {"purl_type": "golang", "purl_namespace": "github.com/gin-gonic", "purl_name": "gin", "vendor": "gin-gonic", "product": "gin"},
+    {"purl_type": "golang", "purl_namespace": "github.com/gorilla", "purl_name": "websocket", "vendor": "gorilla", "product": "websocket"},
+    {"purl_type": "golang", "purl_namespace": "github.com/prometheus", "purl_name": "client_golang", "vendor": "prometheus", "product": "prometheus"},
+    {"purl_type": "golang", "purl_namespace": "github.com/spf13", "purl_name": "cobra", "vendor": "spf13", "product": "cobra"},
+
+    {"purl_type": "gem", "purl_name": "rails", "vendor": "rubyonrails", "product": "rails"},
+    {"purl_type": "gem", "purl_name": "rack", "vendor": "rack_project", "product": "rack"},
+    {"purl_type": "gem", "purl_name": "sidekiq", "vendor": "contribsys", "product": "sidekiq"},
+    {"purl_type": "gem", "purl_name": "puma", "vendor": "puma", "product": "puma"},
+
+    {"purl_type": "cargo", "purl_name": "tokio", "vendor": "tokio_project", "product": "tokio"},
+    {"purl_type": "cargo", "purl_name": "serde", "vendor": "serde_project", "product": "serde"},
+    {"purl_type": "cargo", "purl_name": "actix-web", "vendor": "actix", "product": "actix-web"},
+    {"purl_type": "cargo", "purl_name": "hyper", "vendor": "hyperium", "product": "hyper"},
+
+    {"purl_type": "nuget", "purl_name": "Newtonsoft.Json", "vendor": "newtonsoft", "product": "json.net"},
+    {"purl_type": "nuget", "purl_name": "Microsoft.AspNetCore.App", "vendor": "microsoft", "product": "asp.net_core"},
+
+    {"purl_type": "deb", "purl_namespace": "debian", "purl_name": "openssl", "vendor": "openssl", "product": "openssl"},
+    {"purl_type": "deb", "purl_namespace": "ubuntu", "purl_name": "openssl", "vendor": "openssl", "product": "openssl"},
+    {"purl_type": "deb", "purl_namespace": "debian", "purl_name": "curl", "vendor": "haxx", "product": "curl"},
+    {"purl_type": "deb", "purl_namespace": "debian", "purl_name": "bash", "vendor": "gnu", "product": "bash"},
+    {"purl_type": "deb", "purl_namespace": "debian", "purl_name": "nginx", "vendor": "nginx", "product": "nginx"},
+
+    {"purl_type": "rpm", "purl_namespace": "redhat", "purl_name": "openssl", "vendor": "openssl", "product": "openssl"},
+    {"purl_type": "rpm", "purl_namespace": "redhat", "purl_name": "kernel", "vendor": "linux", "product": "linux_kernel"},
+
+    {"purl_type": "apk", "purl_namespace": "alpine", "purl_name": "openssl", "vendor": "openssl", "product": "openssl"},
+    {"purl_type": "apk", "purl_namespace": "alpine", "purl_name": "musl", "vendor": "musl-libc", "product": "musl"},
+    {"purl_type": "apk", "purl_namespace": "alpine", "purl_name": "busybox", "vendor": "busybox", "product": "busybox"}
+  ]
+}
