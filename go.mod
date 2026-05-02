@@ -6,10 +6,12 @@ require (
 	github.com/CycloneDX/cyclonedx-go v0.10.0
 	github.com/google/go-containerregistry v0.21.5
 	github.com/hashicorp/go-retryablehttp v0.7.8
+	github.com/spdx/tools-golang v0.5.7
 	github.com/spf13/cobra v1.10.2
 )
 
 require (
+	github.com/anchore/go-struct-converter v0.1.0 // indirect
 	github.com/containerd/stargz-snapshotter/estargz v0.18.2 // indirect
 	github.com/docker/cli v29.4.0+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.3 // indirect

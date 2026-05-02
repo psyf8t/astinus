@@ -58,6 +58,10 @@ func ResolveSame(srcFormat model.Format) string {
 		return FormatCycloneDXJSON
 	case model.FormatCycloneDXXML:
 		return FormatCycloneDXXML
+	case model.FormatSPDXJSON:
+		return FormatSPDXJSON
+	case model.FormatSPDXTagValue:
+		return FormatSPDXTagValue
 	default:
 		return FormatCycloneDXJSON
 	}

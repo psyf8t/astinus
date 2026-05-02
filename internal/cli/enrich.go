@@ -23,6 +23,7 @@ import (
 	sbompkg "github.com/psyf8t/astinus/internal/sbom"
 	"github.com/psyf8t/astinus/internal/sbom/cyclonedx"
 	"github.com/psyf8t/astinus/internal/sbom/model"
+	"github.com/psyf8t/astinus/internal/sbom/spdx"
 )
 
 // Enrich exit codes — extends the spec section 6.4 enumeration.
@@ -70,7 +71,7 @@ add the others.`,
 	flags.StringVar(&opts.imageRef, "image", "", "Image reference (required)")
 	flags.StringVarP(&opts.outputPath, "output", "o", "-", "Path to output SBOM, or '-' for stdout")
 	flags.StringVar(&opts.outputFormat, "output-format", output.FormatSame,
-		"Output format: same|cyclonedx-json|cyclonedx-xml")
+		"Output format: same|cyclonedx-json|cyclonedx-xml|spdx-json|spdx-tag-value")
 	flags.StringSliceVar(&opts.enable, "enable", nil,
 		"Comma-separated list of enrichers to run (default: all known)")
 	flags.StringSliceVar(&opts.disable, "disable", nil,
@@ -189,7 +190,7 @@ func loadSBOM(path string) (*model.SBOM, error) {
 	case model.FormatCycloneDXJSON, model.FormatCycloneDXXML:
 		return cyclonedx.ReadBytes(body, format)
 	case model.FormatSPDXJSON, model.FormatSPDXTagValue:
-		return nil, fmt.Errorf("sbom: SPDX support lands in Stage 7 (input was %s)", format)
+		return spdx.ReadBytes(body, format)
 	default:
 		return nil, fmt.Errorf("sbom: unrecognised format")
 	}

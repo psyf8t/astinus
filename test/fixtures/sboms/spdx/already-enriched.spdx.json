@@ -1,0 +1,34 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "enriched-app",
+  "documentNamespace": "https://github.com/psyf8t/astinus/sbom/enriched-app",
+  "creationInfo": {
+    "created": "2026-05-02T00:00:00Z",
+    "creators": ["Tool: astinus-v0.0.0-dev"],
+    "licenseListVersion": "3.23"
+  },
+  "packages": [
+    {
+      "name": "libfoo",
+      "SPDXID": "SPDXRef-Package-libfoo",
+      "versionInfo": "1.0.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [
+        {"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl", "referenceLocator": "pkg:generic/libfoo@1.0.0"},
+        {"referenceCategory": "SECURITY", "referenceType": "cpe23Type", "referenceLocator": "cpe:2.3:a:example:libfoo:1.0.0:*:*:*:*:*:*:*"}
+      ],
+      "annotations": [
+        {"annotator": "Tool: astinus-v0.0.0-dev", "annotationDate": "2026-05-02T00:00:00Z", "annotationType": "OTHER", "comment": "astinus:layer:digest=sha256:abc123"},
+        {"annotator": "Tool: astinus-v0.0.0-dev", "annotationDate": "2026-05-02T00:00:00Z", "annotationType": "OTHER", "comment": "astinus:layer:index=3"},
+        {"annotator": "Tool: astinus-v0.0.0-dev", "annotationDate": "2026-05-02T00:00:00Z", "annotationType": "OTHER", "comment": "astinus:layer:added-by=RUN apt-get install libfoo"},
+        {"annotator": "Tool: astinus-v0.0.0-dev", "annotationDate": "2026-05-02T00:00:00Z", "annotationType": "OTHER", "comment": "astinus:origin=app"}
+      ]
+    }
+  ],
+  "relationships": [
+    {"spdxElementId": "SPDXRef-DOCUMENT", "relatedSpdxElement": "SPDXRef-Package-libfoo", "relationshipType": "DESCRIBES"}
+  ]
+}

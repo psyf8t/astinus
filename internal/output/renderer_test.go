@@ -83,7 +83,8 @@ func TestResolveSame(t *testing.T) {
 	cases := map[model.Format]string{
 		model.FormatCycloneDXJSON: FormatCycloneDXJSON,
 		model.FormatCycloneDXXML:  FormatCycloneDXXML,
-		model.FormatSPDXJSON:      FormatCycloneDXJSON,
+		model.FormatSPDXJSON:      FormatSPDXJSON,
+		model.FormatSPDXTagValue:  FormatSPDXTagValue,
 		model.FormatUnknown:       FormatCycloneDXJSON,
 	}
 	for in, want := range cases {
