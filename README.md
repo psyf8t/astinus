@@ -166,7 +166,8 @@ The project is broken into 16 implementation stages. Current state:
 - ✅ **Stage 8**: Daemon + OCI layout image sources — `oci://`, `docker-daemon://`, `podman-daemon://` schemes wired (Podman uses Docker Engine API + auto socket fallback); image-source factory now covers every reference shape
 - ✅ **Stage 9**: Advanced auth — full native Artifactory provider (Token / API key / OIDC modes, host-scoped) plus informative ECR / GCR / ACR stubs that point operators at the working `<vendor> CLI \| docker login` workflow
 - ✅ **Stage 10**: mTLS + per-registry config — YAML config (`registries[]` with per-host auth/TLS/proxy), `transport.PerRegistry` host-dispatching `RoundTripper`, `--config <path>` wired end-to-end
-- ⬜ Stages 11–15 (next): output formats, air-gapped mode, fingerprint matchers, policy framework, production polish
+- ✅ **Stage 11**: Output formats — SARIF 2.1.0 (GitHub Code Scanning ready) + human summary; CLI now offers `--output-format same|cyclonedx-json|cyclonedx-xml|spdx-json|spdx-tag-value|sarif|summary`
+- ⬜ Stages 12–15 (next): air-gapped mode, fingerprint matchers, policy framework, production polish
 
 The full specification with stage details and acceptance criteria is currently maintained as a private working document.
  
