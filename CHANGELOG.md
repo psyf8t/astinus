@@ -8,6 +8,29 @@ file is for cross-stage fixes that an operator might bisect against.
 
 ### Changed
 
+- CPE enricher now ALWAYS runs the resolver chain when a PURL is
+  present, even on components that already carry a CPE. Syft
+  populates every component with a placeholder
+  `vendor=name, product=name` CPE that almost never matches NVD's
+  authoritative entries; the enricher previously bailed at
+  `if len(c.CPEs) > 0 { ... return }`, leaving 0 added CPEs in
+  production output. Now Astinus's bundled (high-confidence) /
+  heuristic (low-confidence) CPE is appended alongside the
+  pre-existing one. New `cpe.complete` log line surfaces the
+  per-run breakdown (`components_examined`, `had_cpe_already`,
+  `added_cpe`, `validated`, `no_match`, `no_purl`, `purl_error`).
+  On the real ~533 MiB benchmark image: **273 of 753 PURL'd
+  components (36 %) now get an authoritative Astinus CPE — 28
+  high-confidence bundled, 245 heuristic.**
+  (post-Stage-13 hardening Task 5.1 + 5.3)
+- Bundled CPE mapping extended from ~57 → ~91 entries with
+  high-frequency debian packages (libc6, libssl3, libcurl4,
+  openssh, sudo, perl, perl-base, python3, gnupg, git, wget, tar,
+  gzip, coreutils, dpkg, apt, imagemagick, vim, nano, libxml2,
+  libsqlite3-0, zlib1g, ca-certificates), more npm (yargs, json5,
+  jquery, jsonwebtoken, passport, semver, ip, follow-redirects,
+  node-forge, fast-xml-parser, ejs, ssri, etc.), more rpm/apk
+  variants. (post-Stage-13 hardening Task 5.2)
 - basediff fallback mode now matches paths even on components with
   no `LayerInfo`. Previously the enricher early-returned
   `Origin=unknown` for any component without `LayerInfo`, which is

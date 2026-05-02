@@ -3,6 +3,7 @@ package cpe
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/psyf8t/astinus/internal/image"
 	"github.com/psyf8t/astinus/internal/sbom/model"
@@ -51,41 +52,86 @@ func (e *Enricher) Enrich(_ context.Context, sbom *model.SBOM, bundle *image.Bun
 		return fmt.Errorf("cpe: nil sbom")
 	}
 	_ = bundle // unused; kept for the Enricher signature
+
+	stats := enrichStats{}
 	walk(sbom.Components, func(c *model.Component) {
-		e.enrichOne(c)
+		e.enrichOne(c, &stats)
 	})
+
+	slog.Default().Info("cpe.complete",
+		"components_examined", stats.examined,
+		"had_cpe_already", stats.hadCPEAlready,
+		"added_cpe", stats.addedCPE,
+		"validated", stats.validated,
+		"no_match", stats.noMatch,
+		"no_purl", stats.noPURL,
+		"purl_error", stats.purlError,
+	)
 	return nil
 }
 
+// enrichStats counts what the enricher did across one Enrich call.
+// Surfaced via the cpe.complete log so operators can see actual
+// enrichment effectiveness (post-Stage-13 hardening Task 5.3).
+type enrichStats struct {
+	examined      int
+	hadCPEAlready int
+	addedCPE      int // components for which the resolver added at least one CPE
+	validated     int // existing CPEs validated (and the component had any)
+	noMatch       int // PURL parsed but resolver returned nothing
+	noPURL        int // no PURL at all → can't enrich
+	purlError     int // PURL malformed
+}
+
 // enrichOne mutates c in place per the contract above.
-func (e *Enricher) enrichOne(c *model.Component) {
-	if len(c.CPEs) > 0 {
+//
+// Behavior change in post-Stage-13 hardening Task 5.1: the enricher
+// no longer bails early when CPEs already exist. Syft fills every
+// component with a placeholder CPE (`vendor=name, product=name`)
+// that almost never matches NVD's actual entries. Instead we now
+// ALWAYS validate existing CPEs AND ALWAYS run the resolver if a
+// PURL is set, appending unique resolver results alongside.
+func (e *Enricher) enrichOne(c *model.Component, stats *enrichStats) {
+	stats.examined++
+
+	hadExisting := len(c.CPEs) > 0
+	if hadExisting {
+		stats.hadCPEAlready++
 		validateExisting(c)
-		return
+		stats.validated++
 	}
+
 	if c.PURL == "" {
+		if !hadExisting {
+			stats.noPURL++
+		}
 		return
 	}
 
 	purl, err := ParsePURL(c.PURL)
 	if err != nil {
-		// Malformed PURL: leave a breadcrumb so the operator sees
-		// why no CPE was added.
+		stats.purlError++
 		setProp(c, "astinus:cpe:purl-error", err.Error())
 		return
 	}
 
 	matches := e.chain.Resolve(purl)
 	if len(matches) == 0 {
+		stats.noMatch++
 		setProp(c, "astinus:cpe:lookup", "no-match")
 		return
 	}
 
-	// First-source-wins inside Chain (already enforced); record the
-	// source and confidence of the WINNING source.
+	// Append unique resolver matches alongside any existing CPEs
+	// (Syft's placeholder + Astinus's authoritative now coexist).
+	before := len(c.CPEs)
 	c.CPEs = appendUnique(c.CPEs, matches)
-	setProp(c, "astinus:cpe:source", string(matches[0].Source))
-	setProp(c, "astinus:cpe:confidence", string(matches[0].Confidence))
+	if len(c.CPEs) > before {
+		stats.addedCPE++
+		// Record source + confidence of the WINNING resolver match.
+		setProp(c, "astinus:cpe:source", string(matches[0].Source))
+		setProp(c, "astinus:cpe:confidence", string(matches[0].Confidence))
+	}
 }
 
 // validateExisting drops malformed CPE strings from c.CPEs and
