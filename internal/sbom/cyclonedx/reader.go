@@ -8,6 +8,7 @@ import (
 
 	cdx "github.com/CycloneDX/cyclonedx-go"
 
+	sbompkg "github.com/psyf8t/astinus/internal/sbom"
 	"github.com/psyf8t/astinus/internal/sbom/model"
 )
 
@@ -41,7 +42,7 @@ func ReadBytes(body []byte, format model.Format) (*model.SBOM, error) {
 }
 
 func read(r io.Reader, fileFormat cdx.BOMFileFormat, sourceFormat model.Format) (*model.SBOM, error) {
-	body, err := io.ReadAll(r)
+	body, err := sbompkg.ReadAllCapped(r)
 	if err != nil {
 		return nil, fmt.Errorf("cyclonedx: read input: %w", err)
 	}

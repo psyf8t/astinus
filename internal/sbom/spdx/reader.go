@@ -11,6 +11,7 @@ import (
 	v23 "github.com/spdx/tools-golang/spdx/v2/v2_3"
 	"github.com/spdx/tools-golang/tagvalue"
 
+	sbompkg "github.com/psyf8t/astinus/internal/sbom"
 	"github.com/psyf8t/astinus/internal/sbom/model"
 )
 
@@ -19,7 +20,7 @@ var ErrEmptyInput = errors.New("spdx: empty input")
 
 // ReadJSON parses an SPDX 2.x JSON document into the canonical model.
 func ReadJSON(r io.Reader) (*model.SBOM, error) {
-	body, err := io.ReadAll(r)
+	body, err := sbompkg.ReadAllCapped(r)
 	if err != nil {
 		return nil, fmt.Errorf("spdx: read input: %w", err)
 	}
@@ -28,7 +29,7 @@ func ReadJSON(r io.Reader) (*model.SBOM, error) {
 
 // ReadTagValue parses an SPDX 2.x tag-value document.
 func ReadTagValue(r io.Reader) (*model.SBOM, error) {
-	body, err := io.ReadAll(r)
+	body, err := sbompkg.ReadAllCapped(r)
 	if err != nil {
 		return nil, fmt.Errorf("spdx: read input: %w", err)
 	}

@@ -132,6 +132,44 @@ func TestDetectBytesUTF8BOM(t *testing.T) {
 	}
 }
 
+// TestReadAllCappedRejectsOversized — input above MaxSBOMBytes must
+// produce ErrSBOMTooLarge with no partial read leaking through.
+// post-stage-13 review F-005.
+func TestReadAllCappedRejectsOversized(t *testing.T) {
+	// One byte over the cap is enough.
+	r := strings.NewReader(strings.Repeat("x", MaxSBOMBytes+1))
+	body, err := ReadAllCapped(r)
+	if !errors.Is(err, ErrSBOMTooLarge) {
+		t.Fatalf("err = %v, want ErrSBOMTooLarge", err)
+	}
+	if body != nil {
+		t.Errorf("body = %d bytes, want nil on oversize", len(body))
+	}
+}
+
+// TestReadAllCappedAcceptsAtCap — exactly MaxSBOMBytes is fine.
+func TestReadAllCappedAcceptsAtCap(t *testing.T) {
+	r := strings.NewReader(strings.Repeat("x", MaxSBOMBytes))
+	body, err := ReadAllCapped(r)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if len(body) != MaxSBOMBytes {
+		t.Errorf("len = %d, want %d", len(body), MaxSBOMBytes)
+	}
+}
+
+// TestDetectFromReaderRejectsOversized — Detect must surface
+// ErrSBOMTooLarge from ReadAllCapped (wrapped, but errors.Is should
+// still match).
+func TestDetectFromReaderRejectsOversized(t *testing.T) {
+	r := strings.NewReader(strings.Repeat("x", MaxSBOMBytes+1))
+	_, _, err := Detect(r)
+	if !errors.Is(err, ErrSBOMTooLarge) {
+		t.Fatalf("err = %v, want ErrSBOMTooLarge", err)
+	}
+}
+
 // TestDetectBytesUTF16Rejected — UTF-16 input is not a supported
 // SBOM encoding. Surfacing a clear error beats silently returning
 // FormatUnknown (which is what the buggy implementation did).

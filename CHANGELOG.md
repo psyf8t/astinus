@@ -19,6 +19,16 @@ file is for cross-stage fixes that an operator might bisect against.
 
 ### Fixed
 
+- SBOM input is now capped at 256 MiB across every reader (format
+  detector, CycloneDX, SPDX JSON / tag-value, CLI stdin and file
+  paths). Previously every loader called `io.ReadAll` with no upper
+  bound; a runaway scan or hostile input could OOM the process
+  before parsing started. Inputs above the cap are rejected with
+  `ErrSBOMTooLarge`. (post-stage-13 review F-005)
+- The `enrich` output writer's `Close()` error is now checked. A
+  flush failure on output (disk full, broken pipe, FS quota) used
+  to silently produce a truncated SBOM with exit code 0; it now
+  surfaces as `ExitOutputWrite`. (post-stage-13 review F-003)
 - SBOM format detection now strips a leading UTF-8 BOM
   (`0xEF 0xBB 0xBF`) before the shape check. Previously, SBOMs saved
   by Windows tooling (Notepad, PowerShell, some Excel exports)

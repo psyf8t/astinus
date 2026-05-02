@@ -23,6 +23,33 @@ import (
 // disclose its format in the first 64 KiB is unreasonable for an SBOM.
 const peekLimit = 64 * 1024
 
+// MaxSBOMBytes caps how large a single SBOM document we will read
+// into memory. Real-world SBOMs from Syft / Trivy / cdxgen at
+// container scale top out below 50 MiB; 256 MiB is a comfortable
+// ceiling that still fits a small CI runner. Inputs that exceed
+// the cap are rejected with ErrSBOMTooLarge — no truncation,
+// no silent partial parse.
+//
+// post-stage-13 review F-005.
+const MaxSBOMBytes = 256 * 1024 * 1024 // 256 MiB
+
+// ErrSBOMTooLarge is returned when an SBOM input exceeds MaxSBOMBytes.
+var ErrSBOMTooLarge = errors.New("sbom: input exceeds MaxSBOMBytes")
+
+// ReadAllCapped reads r into memory up to MaxSBOMBytes. Returns
+// ErrSBOMTooLarge when the cap is exceeded. Used by every SBOM
+// loader to avoid an unbounded io.ReadAll.
+func ReadAllCapped(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, MaxSBOMBytes+1))
+	if err != nil {
+		return body, err
+	}
+	if int64(len(body)) > MaxSBOMBytes {
+		return nil, ErrSBOMTooLarge
+	}
+	return body, nil
+}
+
 // ErrEmptyInput is returned by Detect when the input has no
 // non-whitespace bytes.
 var ErrEmptyInput = errors.New("sbom: empty input")
@@ -52,7 +79,7 @@ var (
 // "SPDXVersion:" line for tag-value). It deliberately does not validate
 // schema — that's the parser's job.
 func Detect(r io.Reader) (model.Format, []byte, error) {
-	body, err := io.ReadAll(r)
+	body, err := ReadAllCapped(r)
 	if err != nil {
 		return model.FormatUnknown, body, fmt.Errorf("sbom: read input: %w", err)
 	}

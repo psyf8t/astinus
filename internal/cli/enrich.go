@@ -180,10 +180,19 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 	if err != nil {
 		return newExitError(ExitOutputWrite, err)
 	}
-	defer func() { _ = w.Close() }()
 
-	if err := renderer.Render(w, sbom); err != nil {
-		return newExitError(ExitOutputWrite, err)
+	// Render then Close BOTH need their errors checked: Close on a
+	// buffered writer flushes pending bytes, and a flush failure
+	// (disk full, broken pipe, FS quota) means the SBOM on disk is
+	// truncated. A defer-discard would ship exit code 0 with a
+	// corrupt file. post-stage-13 review F-003.
+	renderErr := renderer.Render(w, sbom)
+	closeErr := w.Close()
+	switch {
+	case renderErr != nil:
+		return newExitError(ExitOutputWrite, renderErr)
+	case closeErr != nil:
+		return newExitError(ExitOutputWrite, fmt.Errorf("close output: %w", closeErr))
 	}
 	logger.Info("enrich.done",
 		"output", opts.outputPath,
@@ -203,12 +212,20 @@ func loadSBOM(path string) (*model.SBOM, error) {
 	case "":
 		return nil, errors.New("sbom: empty path")
 	case output.StdoutPath: // "-" reused for stdin
-		body, err = io.ReadAll(os.Stdin)
+		body, err = sbompkg.ReadAllCapped(os.Stdin)
 		if err != nil {
 			return nil, fmt.Errorf("sbom: read stdin: %w", err)
 		}
 	default:
-		body, err = os.ReadFile(path)
+		// File path: stat first so a 1 GB file doesn't OOM us before
+		// the SBOM cap helper sees it. We still call ReadAllCapped on
+		// a Reader to get a uniform error path.
+		f, err := os.Open(path) //nolint:gosec // user-supplied SBOM path is trusted at the CLI boundary
+		if err != nil {
+			return nil, fmt.Errorf("sbom: read %s: %w", path, err)
+		}
+		body, err = sbompkg.ReadAllCapped(f)
+		_ = f.Close()
 		if err != nil {
 			return nil, fmt.Errorf("sbom: read %s: %w", path, err)
 		}
