@@ -168,7 +168,8 @@ The project is broken into 16 implementation stages. Current state:
 - ✅ **Stage 10**: mTLS + per-registry config — YAML config (`registries[]` with per-host auth/TLS/proxy), `transport.PerRegistry` host-dispatching `RoundTripper`, `--config <path>` wired end-to-end
 - ✅ **Stage 11**: Output formats — SARIF 2.1.0 (GitHub Code Scanning ready) + human summary; CLI now offers `--output-format same|cyclonedx-json|cyclonedx-xml|spdx-json|spdx-tag-value|sarif|summary`
 - ✅ **Stage 12**: Air-gapped mode + offline DB — `astinus offline-db build`, `--no-network` (refuses registry refs with exit 30), `--offline-db <path>` plumbed through CPE + fingerprint matchers; JSON-per-file catalogue layout
-- ⬜ Stages 13–15 (next): online fingerprint matchers, policy framework, production polish
+- ✅ **Stage 13**: Online fingerprint matchers — Software Heritage HTTP lookup wrapped in cache + token-bucket rate limit; ClearlyDefined skeleton (CD is coordinate-indexed not hash-indexed); `--no-network` skips online matchers entirely
+- ⬜ Stages 14–15 (next): policy framework, production polish
 
 The full specification with stage details and acceptance criteria is currently maintained as a private working document.
  
