@@ -84,6 +84,82 @@ func TestDetectBytesEmpty(t *testing.T) {
 	}
 }
 
+// TestDetectBytesUTF8BOM — Windows tooling (Notepad, PowerShell) emits
+// JSON with a leading UTF-8 BOM. Detection must strip it transparently.
+// Post-stage-13 review F-002 root-cause regression.
+func TestDetectBytesUTF8BOM(t *testing.T) {
+	cases := []struct {
+		name  string
+		input []byte
+		want  model.Format
+	}{
+		{
+			name:  "cyclonedx-json",
+			input: append([]byte{0xEF, 0xBB, 0xBF}, []byte(`{"bomFormat":"CycloneDX","specVersion":"1.6"}`)...),
+			want:  model.FormatCycloneDXJSON,
+		},
+		{
+			name:  "spdx-json",
+			input: append([]byte{0xEF, 0xBB, 0xBF}, []byte(`{"spdxVersion":"SPDX-2.3","SPDXID":"SPDXRef-DOCUMENT"}`)...),
+			want:  model.FormatSPDXJSON,
+		},
+		{
+			name:  "cyclonedx-xml",
+			input: append([]byte{0xEF, 0xBB, 0xBF}, []byte(`<?xml version="1.0"?><bom xmlns="http://cyclonedx.org/schema/bom/1.6"></bom>`)...),
+			want:  model.FormatCycloneDXXML,
+		},
+		{
+			name:  "spdx-tag-value",
+			input: append([]byte{0xEF, 0xBB, 0xBF}, []byte("SPDXVersion: SPDX-2.3\n")...),
+			want:  model.FormatSPDXTagValue,
+		},
+		{
+			name:  "bom-then-whitespace-then-json",
+			input: append([]byte{0xEF, 0xBB, 0xBF}, []byte("\n  "+`{"bomFormat":"CycloneDX","specVersion":"1.6"}`)...),
+			want:  model.FormatCycloneDXJSON,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := DetectBytes(c.input)
+			if err != nil {
+				t.Fatalf("DetectBytes() unexpected error: %v", err)
+			}
+			if got != c.want {
+				t.Fatalf("DetectBytes() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestDetectBytesUTF16Rejected — UTF-16 input is not a supported
+// SBOM encoding. Surfacing a clear error beats silently returning
+// FormatUnknown (which is what the buggy implementation did).
+func TestDetectBytesUTF16Rejected(t *testing.T) {
+	cases := []struct {
+		name string
+		bom  []byte
+	}{
+		{"utf16-le", []byte{0xFF, 0xFE}},
+		{"utf16-be", []byte{0xFE, 0xFF}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// Append a few zero bytes — a real UTF-16 document would
+			// have them. The BOM alone is enough for the detector to
+			// reject.
+			body := append(c.bom, 0x00, 0x00, 0x00, 0x00)
+			got, err := DetectBytes(body)
+			if !errors.Is(err, ErrUTF16NotSupported) {
+				t.Fatalf("err = %v, want ErrUTF16NotSupported", err)
+			}
+			if got != model.FormatUnknown {
+				t.Errorf("format = %v, want FormatUnknown", got)
+			}
+		})
+	}
+}
+
 func TestDetectFromReader(t *testing.T) {
 	const input = `{"bomFormat":"CycloneDX","specVersion":"1.6"}`
 	format, body, err := Detect(strings.NewReader(input))

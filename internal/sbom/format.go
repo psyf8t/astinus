@@ -27,6 +27,23 @@ const peekLimit = 64 * 1024
 // non-whitespace bytes.
 var ErrEmptyInput = errors.New("sbom: empty input")
 
+// ErrUTF16NotSupported is returned when the input begins with a UTF-16
+// byte-order mark. SBOM specs (CycloneDX 1.6, SPDX 2.3, SPDX 3.0) all
+// mandate UTF-8; we surface a clear error rather than misclassify.
+var ErrUTF16NotSupported = errors.New("sbom: UTF-16 input not supported (UTF-8 only)")
+
+// utf8BOM is the byte sequence Windows tooling (Notepad, PowerShell,
+// some Excel exports) prepends to JSON files. It is NOT Unicode
+// whitespace, so a plain `bytes.TrimLeftFunc(body, unicode.IsSpace)`
+// leaves it in place — the post-stage-13 review F-002 root cause.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// utf16LEBOM and utf16BEBOM are the little/big-endian UTF-16 markers.
+var (
+	utf16LEBOM = []byte{0xFF, 0xFE}
+	utf16BEBOM = []byte{0xFE, 0xFF}
+)
+
 // Detect reads r in full, returns the detected format, and gives back
 // the consumed bytes so the caller does not have to seek/replay r.
 //
@@ -44,10 +61,21 @@ func Detect(r io.Reader) (model.Format, []byte, error) {
 }
 
 // DetectBytes is Detect's pure-bytes counterpart. It reports
-// ErrEmptyInput when body has no non-whitespace content; otherwise it
+// ErrEmptyInput when body has no non-whitespace content,
+// ErrUTF16NotSupported when the input is UTF-16 encoded; otherwise it
 // returns FormatUnknown (and a nil error) when the shape doesn't match
 // any known SBOM.
+//
+// A leading UTF-8 BOM (0xEF 0xBB 0xBF), commonly added by Windows
+// tooling, is stripped before the shape check.
 func DetectBytes(body []byte) (model.Format, error) {
+	switch {
+	case bytes.HasPrefix(body, utf16LEBOM), bytes.HasPrefix(body, utf16BEBOM):
+		return model.FormatUnknown, ErrUTF16NotSupported
+	case bytes.HasPrefix(body, utf8BOM):
+		body = body[len(utf8BOM):]
+	}
+
 	trimmed := bytes.TrimLeftFunc(body, unicode.IsSpace)
 	if len(trimmed) == 0 {
 		return model.FormatUnknown, ErrEmptyInput

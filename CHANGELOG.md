@@ -19,6 +19,13 @@ file is for cross-stage fixes that an operator might bisect against.
 
 ### Fixed
 
+- SBOM format detection now strips a leading UTF-8 BOM
+  (`0xEF 0xBB 0xBF`) before the shape check. Previously, SBOMs saved
+  by Windows tooling (Notepad, PowerShell, some Excel exports)
+  returned `unrecognised format` because the BOM is not Unicode
+  whitespace. UTF-16 inputs (`0xFF 0xFE` / `0xFE 0xFF`) now produce
+  a clear `ErrUTF16NotSupported` error instead of silent
+  `FormatUnknown`. (post-stage-13 review F-002)
 - Auto-detection now correctly resolves locally-built images via the
   Docker / Podman daemon before attempting a registry pull. Previously
   failed with `401 UNAUTHORIZED` when the image existed only in the
