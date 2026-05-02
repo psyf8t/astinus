@@ -1,9 +1,11 @@
 # syntax=docker/dockerfile:1.7
 
 # ─── Build stage ────────────────────────────────────────────────────────────
-# Pin a specific Go minor; bump deliberately.
-# Floor is set by go.mod (currently 1.25, see ADR-0003).
-FROM golang:1.25-alpine AS build
+# Pin a specific Go patch; bump deliberately. Floor set by go.mod (1.25.9,
+# see ADR-0003 + post-stage-13 review F-001 — 1.25.0 exposed 19 stdlib CVEs
+# reported by govulncheck; 1.25.9 clears all known stdlib advisories at the
+# time of pin).
+FROM golang:1.25.9-alpine AS build
 
 WORKDIR /src
 

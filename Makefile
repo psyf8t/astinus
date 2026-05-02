@@ -5,6 +5,15 @@ BIN_NAME   := astinus
 PKG        := github.com/psyf8t/astinus
 ENTRYPOINT := ./cmd/astinus
 
+# Pin the toolchain so every `go` invocation in this Makefile uses the
+# same version. Without this, GOTOOLCHAIN=auto re-resolves per
+# subprocess and can mix the locally-installed `go tool cover` with an
+# auto-downloaded compiler, producing
+# `compile: version "X" does not match go tool version "Y"`.
+# Read from the `go` directive in go.mod (always present;
+# `go mod tidy` strips redundant `toolchain` lines).
+export GOTOOLCHAIN := go$(shell awk '/^go [0-9]/{print $$2; exit}' go.mod 2>/dev/null)
+
 # VERSION may be overridden in releases (e.g. `make build VERSION=v0.1.0`).
 VERSION ?= v0.0.0-dev
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)

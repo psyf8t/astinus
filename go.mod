@@ -1,6 +1,6 @@
 module github.com/psyf8t/astinus
 
-go 1.25.0
+go 1.25.9
 
 require (
 	github.com/CycloneDX/cyclonedx-go v0.10.0
