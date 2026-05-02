@@ -17,8 +17,24 @@ file is for cross-stage fixes that an operator might bisect against.
   now exports `GOTOOLCHAIN` from the `go` directive so all `go`
   invocations agree on a version. (post-stage-13 review F-001)
 
+### Added
+
+- Fuzz targets for the five hand-rolled parsers: `FuzzDetectBytes`,
+  `FuzzReadJSON` (CycloneDX), `FuzzReadJSON` + `FuzzReadTagValue`
+  (SPDX), `FuzzReadGoBuildInfo`. Seeded from existing fixtures plus
+  crafted edge cases (BOMs, truncations, magic-byte stubs). The
+  contract is "must not panic"; every fuzz seed runs as part of the
+  regular test suite. Discovered and fixed one real nil-pointer
+  panic in the SPDX mapper (see Fixed below). (post-stage-13 review F-006)
+
 ### Fixed
 
+- SPDX JSON loader no longer panics on inputs where the upstream
+  parser yields a nil entry inside the `packages` slice (e.g. some
+  malformed documents the fuzzer found). The mapper now skips nil
+  package entries instead of dereferencing. Discovered by
+  `FuzzReadJSON/76ba352485d14925` corpus entry, now part of the
+  regression suite.
 - SBOM input is now capped at 256 MiB across every reader (format
   detector, CycloneDX, SPDX JSON / tag-value, CLI stdin and file
   paths). Previously every loader called `io.ReadAll` with no upper

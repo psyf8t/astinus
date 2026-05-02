@@ -271,6 +271,13 @@ func componentsFromPackages(pkgs []*v23.Package) []model.Component {
 	}
 	out := make([]model.Component, 0, len(pkgs))
 	for _, p := range pkgs {
+		// tools-golang's JSON loader can hand us a nil entry on
+		// malformed input (FuzzReadJSON corpus 76ba3524…). Skip
+		// rather than panic; a missing component is preferable to
+		// a hard crash on hostile or buggy SBOMs.
+		if p == nil {
+			continue
+		}
 		out = append(out, packageToComponent(p))
 	}
 	return out
