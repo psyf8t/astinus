@@ -17,6 +17,7 @@ import (
 	"github.com/psyf8t/astinus/internal/enrich/attribution"
 	"github.com/psyf8t/astinus/internal/enrich/basediff"
 	"github.com/psyf8t/astinus/internal/enrich/cpe"
+	"github.com/psyf8t/astinus/internal/enrich/dedup"
 	"github.com/psyf8t/astinus/internal/enrich/untracked"
 	"github.com/psyf8t/astinus/internal/fingerprint/matcher"
 	"github.com/psyf8t/astinus/internal/image"
@@ -423,6 +424,10 @@ func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.
 		basediff.NewWithOptions(basediffOptionsFor(opts, sourceOpts)),
 		untrackedEnricher,
 		cpeEnricher,
+		// dedup is the finalize stage — runs LAST so PURLs / CPEs
+		// added by upstream enrichers participate in the dedup key.
+		// post-Stage-13 hardening Task 2.
+		dedup.New(),
 	}, nil
 }
 

@@ -28,6 +28,19 @@ file is for cross-stage fixes that an operator might bisect against.
 
 ### Added
 
+- New `dedup` enricher (`internal/enrich/dedup`) runs as the
+  pipeline finalize stage and merges duplicate components. Keys
+  by priority: PURL > CPE > SHA-256 > name+version+type.
+  Components with no identifying signal pass through unchanged
+  (two `name="config.txt"` components without versions are NOT
+  assumed identical). Merge is union of evidence locations,
+  hashes, licenses, CPEs, and properties (primary wins on
+  property conflict; secondary value preserved as
+  `astinus:dedup:conflict:<key>` breadcrumb). Primary chosen by
+  identification strength (PURL beats no-PURL; more
+  Evidence.Locations beats fewer; original-order-earliest as
+  tiebreaker). On a real ~533 MiB Node.js+Debian image: 8 923 →
+  6 608 components in 8 ms. (post-Stage-13 hardening Task 2)
 - New `ModePartial` for basediff. When the base image reference is
   known (label or explicit) but the base image cannot be opened
   (typical: `docker pull` not yet run, no daemon copy, network
