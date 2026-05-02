@@ -17,10 +17,12 @@ package image
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
+	"github.com/psyf8t/astinus/internal/image/runtime"
 	"github.com/psyf8t/astinus/internal/image/source"
 	"github.com/psyf8t/astinus/internal/sbom/model"
 )
@@ -44,6 +46,18 @@ type Bundle struct {
 	// SBOM is the canonical SBOM the pipeline mutates. Always non-nil
 	// after Open. Owned by the Bundle — enrichers mutate in place.
 	SBOM *model.SBOM
+
+	// Runtime is the build tool that produced Image, as classified by
+	// runtime.Detect during Open. Defaults to runtime.RuntimeDocker
+	// (the documented fallback) when no distinctive signal is found,
+	// or runtime.RuntimeUnknown when the image config could not be
+	// read at all. Bundles built via NewBundle have the zero value
+	// — call Bundle.DetectRuntime to populate it explicitly.
+	Runtime runtime.Runtime
+
+	// RuntimeEvidence records the signals that led to Runtime. Empty
+	// when Runtime is the default fallback.
+	RuntimeEvidence []runtime.DetectionEvidence
 }
 
 // Open loads the image referenced by ref, pairs it with sbom, and
@@ -65,12 +79,32 @@ func Open(ctx context.Context, ref string, sbom *model.SBOM, opts ...source.Opti
 		_ = src.Close()
 		return nil, fmt.Errorf("image: load image %q: %w", ref, err)
 	}
+	rt, evidence := detectRuntime(img)
+	slog.Default().Info("runtime.detected",
+		"runtime", string(rt),
+		"ref", ref,
+		"evidence_count", len(evidence))
 	return &Bundle{
-		Reference: src.Reference(),
-		Source:    src,
-		Image:     img,
-		SBOM:      sbom,
+		Reference:       src.Reference(),
+		Source:          src,
+		Image:           img,
+		SBOM:            sbom,
+		Runtime:         rt,
+		RuntimeEvidence: evidence,
 	}, nil
+}
+
+// detectRuntime wraps runtime.Detect with the contract Open promises:
+// any error reading the config collapses to (RuntimeUnknown, nil).
+// Detection failure is never a reason to refuse the bundle — the
+// downstream attribution enricher treats Unknown as "low confidence,
+// proceed" rather than fatal.
+func detectRuntime(img v1.Image) (runtime.Runtime, []runtime.DetectionEvidence) {
+	rt, ev, err := runtime.Detect(img)
+	if err != nil {
+		return runtime.RuntimeUnknown, nil
+	}
+	return rt, ev
 }
 
 // NewBundle builds a Bundle from an already-loaded v1.Image. Useful

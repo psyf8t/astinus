@@ -14,6 +14,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
 	"github.com/psyf8t/astinus/internal/image"
+	"github.com/psyf8t/astinus/internal/image/runtime"
 	"github.com/psyf8t/astinus/internal/sbom/model"
 )
 
@@ -177,6 +178,68 @@ func TestAttributionRequiresImage(t *testing.T) {
 func TestAttributionName(t *testing.T) {
 	if New().Name() != "attribution" {
 		t.Errorf("Name = %q", New().Name())
+	}
+}
+
+func TestAttributionStampsRuntimeAndConfidence(t *testing.T) {
+	img := buildImage(t, []map[string]string{{"a": "1"}})
+	sbom := &model.SBOM{
+		Components: []model.Component{{
+			Name: "x", Evidence: &model.Evidence{Locations: []model.EvidenceLocation{{Path: "a"}}},
+		}},
+	}
+	bundle := image.NewBundle(mustTag(t, "test/x:1"), img, sbom)
+	bundle.Runtime = "kaniko"
+	bundle.RuntimeEvidence = []runtime.DetectionEvidence{{
+		Field: "config.Author", Value: "Kaniko", Reason: "exact author match",
+	}}
+
+	// Replace normalize with a fixed Kaniko-shaped layer set so the
+	// test does not depend on the real go-containerregistry layer
+	// reading (which the build helpers above do exercise — but here
+	// we want to assert the stamping behaviour deterministically).
+	e := New()
+	e.normalizeFn = func(_ runtime.Runtime, _ *image.Bundle) ([]runtime.NormalizedLayer, error) {
+		return []runtime.NormalizedLayer{{
+			Index:           0,
+			CreatedBy:       "RUN apt-get && build && copy",
+			RuntimeMetadata: map[string]string{"squashed": "likely"},
+		}}, nil
+	}
+
+	if err := e.Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+
+	if got := sbom.Metadata.Properties[model.PropertyRuntime]; got != "kaniko" {
+		t.Errorf("PropertyRuntime = %q, want kaniko", got)
+	}
+	if got := sbom.Metadata.Properties[model.PropertyAttributionConfidence]; got != "low" {
+		t.Errorf("PropertyAttributionConfidence = %q, want low", got)
+	}
+	if got := sbom.Metadata.Properties[model.PropertyAttributionReason]; got == "" {
+		t.Error("PropertyAttributionReason must not be empty")
+	}
+	if got := sbom.Metadata.Properties[model.PropertyRuntimeEvidence]; got == "" {
+		t.Error("PropertyRuntimeEvidence must not be empty when evidence is present")
+	}
+}
+
+func TestAttributionRuntimeStampDefaultsToUnknown(t *testing.T) {
+	img := buildImage(t, []map[string]string{{"a": "1"}})
+	sbom := &model.SBOM{
+		Components: []model.Component{{
+			Name: "x", Evidence: &model.Evidence{Locations: []model.EvidenceLocation{{Path: "a"}}},
+		}},
+	}
+	bundle := image.NewBundle(mustTag(t, "test/x:1"), img, sbom)
+	// Bundle.Runtime intentionally left zero — we want unknown.
+
+	if err := New().Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if got := sbom.Metadata.Properties[model.PropertyRuntime]; got != "unknown" {
+		t.Errorf("PropertyRuntime = %q, want unknown", got)
 	}
 }
 

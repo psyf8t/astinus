@@ -32,4 +32,17 @@ const (
 	// Top-level metadata stamp emitted on every Astinus-touched SBOM.
 	PropertyEnrichedBy      = "astinus:enriched-by"
 	PropertyEnrichedVersion = "astinus:enriched-version"
+
+	// Build-runtime detection (PRSD Task 0). Stamped on
+	// Metadata.Properties so the result is a single observation per
+	// SBOM, not duplicated per component.
+	PropertyRuntime         = "astinus:runtime"
+	PropertyRuntimeEvidence = "astinus:runtime:evidence"
+
+	// Attribution confidence (PRSD Task 0). Reflects how much we
+	// trust LayerInfo across the SBOM — squashed images from Kaniko
+	// get "low", BuildKit-with-provenance gets "high", normal Docker
+	// builds get "medium".
+	PropertyAttributionConfidence = "astinus:attribution:confidence"
+	PropertyAttributionReason     = "astinus:attribution:reason"
 )

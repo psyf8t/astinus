@@ -16,6 +16,7 @@ import (
 
 	"github.com/psyf8t/astinus/internal/image"
 	"github.com/psyf8t/astinus/internal/image/layer"
+	"github.com/psyf8t/astinus/internal/image/runtime"
 	"github.com/psyf8t/astinus/internal/sbom/model"
 )
 
@@ -32,6 +33,16 @@ const Name = "attribution"
 type Enricher struct {
 	// walkFn is overridable for tests.
 	walkFn func(context.Context, *image.Bundle) (*layer.FileMap, error)
+
+	// normalizeFn is overridable for tests so the runtime-stamping
+	// path can be exercised without going through real layer reads.
+	normalizeFn func(runtime.Runtime, *image.Bundle) ([]runtime.NormalizedLayer, error)
+
+	// hasProvenance is overridable for tests. Production passes
+	// nil; the BuildKit provenance plumbing reaches the SBOM via
+	// Bundle.Runtime evidence today and via a bundle.Provenance
+	// field once Task 6 wires it through.
+	hasProvenance HasProvenance
 }
 
 // New returns a fresh Enricher with the default walker.
@@ -63,11 +74,50 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 
 	stamper := &stamper{fm: fileMap}
 	stamper.applyAll(sbom.Components)
+
+	e.stampRuntimeAndConfidence(sbom, bundle)
 	return nil
+}
+
+// stampRuntimeAndConfidence writes the runtime + attribution-confidence
+// metadata on sbom.Metadata.Properties. The decision is per-image,
+// not per-component, so it lives at the SBOM level.
+//
+// Failure to compute confidence (e.g. layers cannot be read) is not
+// fatal — we record runtime alone and leave the attribution stamps
+// off, so the operator can see "we tried" rather than a silent gap.
+func (e *Enricher) stampRuntimeAndConfidence(sbom *model.SBOM, bundle *image.Bundle) {
+	if sbom.Metadata.Properties == nil {
+		sbom.Metadata.Properties = map[string]string{}
+	}
+	rt := bundle.Runtime
+	if rt == "" {
+		rt = runtime.RuntimeUnknown
+	}
+	sbom.Metadata.Properties[model.PropertyRuntime] = string(rt)
+	if summary := EvidenceSummary(bundle.RuntimeEvidence); summary != "" {
+		sbom.Metadata.Properties[model.PropertyRuntimeEvidence] = summary
+	}
+
+	normalize := e.normalizeFn
+	if normalize == nil {
+		normalize = defaultNormalize
+	}
+	layers, err := normalize(rt, bundle)
+	if err != nil {
+		return
+	}
+	conf, reason := DetermineConfidence(layers, rt, e.hasProvenance)
+	sbom.Metadata.Properties[model.PropertyAttributionConfidence] = string(conf)
+	sbom.Metadata.Properties[model.PropertyAttributionReason] = reason
 }
 
 func defaultWalk(ctx context.Context, b *image.Bundle) (*layer.FileMap, error) {
 	return layer.Walk(ctx, b.Image)
+}
+
+func defaultNormalize(rt runtime.Runtime, b *image.Bundle) ([]runtime.NormalizedLayer, error) {
+	return runtime.Normalize(rt, b.Image)
 }
 
 // stamper holds the file map for the duration of one Enrich call so
