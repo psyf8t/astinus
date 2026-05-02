@@ -160,9 +160,8 @@ The project is broken into 16 implementation stages. Current state:
 - ✅ **Stage 2**: Image source foundation — registry + tar archive sources, env/docker-config credential chain, custom-CA / proxy / retry transport
 - ✅ **Stage 3**: Enrichment pipeline + Layer Attribution enricher + working `astinus enrich` end-to-end command
 - ✅ **Stage 4**: Untracked components detection — classify vendored binaries / archives / scripts, extract Go `buildinfo` and JAR `MANIFEST.MF`, pluggable hash → component matcher chain
-- ⬜ Stage 5 (next): Base image diff
-- ⬜ Stage 5: Base image diff
-- ⬜ Stage 6: CPE enrichment
+- ✅ **Stage 5**: Base image diff — auto-detects base from OCI labels, splits components into `base` / `app` / `unknown` via fast layer-prefix comparison with path-fallback for rebased images
+- ⬜ Stage 6 (next): CPE enrichment
 - ⬜ Stage 7: SPDX support
 - ⬜ Stages 8–15: Advanced auth, output formats, air-gapped mode, fingerprint matchers, policy framework, production polish
 
