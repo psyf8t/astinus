@@ -14,17 +14,27 @@ func TestFromReferenceEmpty(t *testing.T) {
 	}
 }
 
-func TestFromReferenceUnsupportedSchemes(t *testing.T) {
-	cases := []string{
-		"oci://./layout",
-		"docker-daemon://nginx:latest",
-		"podman-daemon://nginx:latest",
+func TestFromReferenceLayoutSchemeMissingDir(t *testing.T) {
+	// `oci://` requires a real layout dir; missing directory is
+	// surfaced as ErrNotFound.
+	_, err := FromReference(context.Background(), "oci:///no/such/layout")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
-	for _, ref := range cases {
+}
+
+func TestFromReferenceDaemonSchemes(t *testing.T) {
+	// docker-daemon:// and podman-daemon:// always return a source
+	// (lazy); the underlying daemon call only happens on Image().
+	for _, ref := range []string{"docker-daemon://nginx:latest", "podman-daemon://nginx:latest"} {
 		t.Run(ref, func(t *testing.T) {
-			_, err := FromReference(context.Background(), ref)
-			if !errors.Is(err, ErrUnsupportedScheme) {
-				t.Fatalf("err = %v, want ErrUnsupportedScheme", err)
+			src, err := FromReference(context.Background(), ref)
+			if err != nil {
+				t.Fatalf("FromReference(%q): %v", ref, err)
+			}
+			defer src.Close()
+			if _, ok := src.(*daemonSource); !ok {
+				t.Errorf("source = %T, want *daemonSource", src)
 			}
 		})
 	}
@@ -84,16 +94,15 @@ func TestFromReferenceDirectoryNotOCILayout(t *testing.T) {
 	}
 }
 
-func TestFromReferenceOCILayoutDirectory(t *testing.T) {
-	dir := t.TempDir()
-	for _, name := range []string{"index.json", "oci-layout"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+func TestFromReferenceOCILayoutDirectoryAutoDetect(t *testing.T) {
+	dir := buildLayoutDir(t)
+	src, err := FromReference(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("FromReference: %v", err)
 	}
-	_, err := FromReference(context.Background(), dir)
-	if !errors.Is(err, ErrUnsupportedScheme) {
-		t.Fatalf("err = %v, want ErrUnsupportedScheme (OCI layout planned for Stage 8)", err)
+	defer src.Close()
+	if _, ok := src.(*layoutSource); !ok {
+		t.Errorf("source = %T, want *layoutSource", src)
 	}
 }
 

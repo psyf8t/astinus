@@ -46,9 +46,11 @@ func fromExplicit(_ context.Context, scheme, body string, opts Options) (ImageSo
 	case "archive":
 		return newArchiveSource(body, "")
 	case "oci":
-		return nil, fmt.Errorf("source: oci layout (%q) lands in Stage 8: %w", body, ErrUnsupportedScheme)
-	case "docker-daemon", "podman-daemon":
-		return nil, fmt.Errorf("source: %s daemon (%q) lands in Stage 8: %w", scheme, body, ErrUnsupportedScheme)
+		return newLayoutSource(body, opts)
+	case "docker-daemon":
+		return newDaemonSource(body, DaemonDocker)
+	case "podman-daemon":
+		return newDaemonSource(body, DaemonPodman)
 	default:
 		return nil, fmt.Errorf("source: unknown scheme %q: %w", scheme, ErrUnsupportedScheme)
 	}
@@ -61,7 +63,7 @@ func autoDetect(_ context.Context, ref string, opts Options) (ImageSource, error
 		switch {
 		case info.IsDir():
 			if isOCILayout(ref) {
-				return nil, fmt.Errorf("source: oci layout (%q) lands in Stage 8: %w", ref, ErrUnsupportedScheme)
+				return newLayoutSource(ref, opts)
 			}
 			// Could still be the path of a registry pulled into a
 			// directory; better to surface a clear error than to
