@@ -198,6 +198,124 @@ func TestEnricherName(t *testing.T) {
 
 // ─── helpers ──────────────────────────────────────────────────────────────
 
+// TestEnrichSkipsRedundantUnderSyftPackageRoot — end-to-end check that
+// a Syft-produced component (locations in `syft:location:N:path`
+// properties, NOT evidence.occurrences) suppresses every untracked
+// scan of the same package directory. This is the root cause of the
+// 9 302 → ~500 noise reduction reported in the post-Stage-13 hardening
+// sprint Task 1.
+func TestEnrichSkipsRedundantUnderSyftPackageRoot(t *testing.T) {
+	img := buildImage(t, map[string][]byte{
+		// Real package files inside an "npm package" Syft already covers.
+		"app/node_modules/lodash/package.json": []byte(`{"name":"lodash"}`),
+		"app/node_modules/lodash/index.js":     []byte("module.exports = {};"),
+		"app/node_modules/lodash/LICENSE":      []byte("MIT"),
+		// File OUTSIDE the package — must remain untracked.
+		"opt/yq": {0x7f, 'E', 'L', 'F', 0, 0, 0, 0, 1, 2, 3},
+	})
+	sbom := &model.SBOM{Components: []model.Component{{
+		Name:    "lodash",
+		Version: "4.17.21",
+		PURL:    "pkg:npm/lodash@4.17.21",
+		Properties: map[string]string{
+			"syft:location:0:path": "/app/node_modules/lodash/package.json",
+		},
+	}}}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+
+	if err := New().Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+
+	// Original lodash + only the executable should remain (NOT the
+	// LICENSE, NOT index.js, NOT package.json).
+	if len(sbom.Components) != 2 {
+		got := make([]string, 0, len(sbom.Components))
+		for _, c := range sbom.Components {
+			got = append(got, c.Name)
+		}
+		t.Fatalf("components = %v, want [lodash, yq]", got)
+	}
+	for _, c := range sbom.Components {
+		if c.Name == "LICENSE" || c.Name == "index.js" || c.Name == "package.json" {
+			t.Errorf("redundant component leaked: %s", c.Name)
+		}
+	}
+}
+
+// TestEnrichSkipsLicenseAndDocFiles — files matching the noisy
+// filename catalog are dropped without ever being hashed.
+func TestEnrichSkipsLicenseAndDocFiles(t *testing.T) {
+	img := buildImage(t, map[string][]byte{
+		"opt/foo/LICENSE":       []byte("MIT..."),
+		"opt/foo/README.md":     []byte("# foo"),
+		"opt/foo/CHANGELOG.txt": []byte("v1"),
+		"opt/foo/COPYING":       []byte("GPL-2"),
+		"opt/foo/source.h":      []byte("#define FOO"),
+		"opt/foo/bundle.js.map": []byte("{}"),
+		"opt/bin/myapp":         {0x7f, 'E', 'L', 'F', 0, 0, 0, 0, 1, 2, 3},
+	})
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+
+	if err := New().Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+
+	if len(sbom.Components) != 1 {
+		got := make([]string, 0, len(sbom.Components))
+		for _, c := range sbom.Components {
+			got = append(got, c.Name)
+		}
+		t.Fatalf("components = %v, want [myapp]", got)
+	}
+	if sbom.Components[0].Name != "myapp" {
+		t.Errorf("kept = %s, want myapp", sbom.Components[0].Name)
+	}
+}
+
+// TestEnrichIncludeFlagsBypassFilters — --include-noise re-admits
+// files filtered by the catalog pre-pass (LICENSE, COPYING, …) and
+// stamps the bypass reason. Files that are ALSO filtered by the
+// classifier (e.g. README.md → CategoryConfig because of .md) stay
+// dropped; the include flag is for the catalog, not the classifier.
+func TestEnrichIncludeFlagsBypassFilters(t *testing.T) {
+	img := buildImage(t, map[string][]byte{
+		"opt/foo/LICENSE": []byte("MIT"),
+		"opt/foo/COPYING": []byte("GPL"),
+		"opt/bin/myapp":   {0x7f, 'E', 'L', 'F', 0, 0, 0, 0, 1, 2, 3},
+	})
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+
+	e := NewWithOptions(Options{
+		Include: IncludeMask{IncludeNoise: true},
+	})
+	if err := e.Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+
+	// myapp + LICENSE + COPYING. LICENSE/COPYING bypassed the noise
+	// catalog; the classifier admits them as Unknown (no extension /
+	// magic match).
+	if len(sbom.Components) != 3 {
+		got := make([]string, 0, len(sbom.Components))
+		for _, c := range sbom.Components {
+			got = append(got, c.Name)
+		}
+		t.Fatalf("components = %v, want [myapp, LICENSE, COPYING]", got)
+	}
+	bypassed := 0
+	for _, c := range sbom.Components {
+		if c.Properties["astinus:untracked:filter-bypass"] == "noise" {
+			bypassed++
+		}
+	}
+	if bypassed != 2 {
+		t.Errorf("bypassed = %d, want 2 (LICENSE + COPYING)", bypassed)
+	}
+}
+
 func buildImage(t *testing.T, files map[string][]byte) v1.Image {
 	t.Helper()
 	layer, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) {

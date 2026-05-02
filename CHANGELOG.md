@@ -6,6 +6,31 @@ file is for cross-stage fixes that an operator might bisect against.
 
 ## Unreleased
 
+### Changed
+
+- Untracked enricher now skips files that belong to packages already
+  in the SBOM. Reads file paths from BOTH `Component.Evidence.Locations`
+  AND Syft's `syft:location:N:path` properties (Syft does not populate
+  `evidence.occurrences`, so the previous implementation was blind to
+  every file Syft already covered). Derives package roots from
+  per-ecosystem manifest files (`package.json`, `setup.py`, `go.mod`,
+  `Cargo.toml`, `pom.xml`, `Gemfile`, `composer.json`, `METADATA`,
+  `PKG-INFO`, `control`, `*.gemspec`) and drops every file under any
+  derived root. New `--include-redundant` flag opts back in for debug.
+  On a real ~1 GB Node.js+Debian image this drops 9 302 untracked
+  components ≥ 90% (post-Stage-13 hardening Task 1.1).
+- Untracked enricher now skips files whose basename or extension marks
+  them as documentation / source / debug-symbol noise (LICENSE, README,
+  COPYING, AUTHORS, CHANGELOG, *.h, *.cpp, *.map, *.d.ts, *.asc, …).
+  New `--include-noise` flag opts back in for debug. Library / archive
+  / executable extensions (`.so`, `.dll`, `.jar`, `.dylib`) are
+  deliberately NOT in the catalog — they ARE components.
+  (post-Stage-13 hardening Task 1.2)
+- Untracked enricher emits a `untracked.stats` log line at the end of
+  every scan with `files_scanned`, `files_added`, `files_skipped_*`
+  counters per category and throughput.
+  (post-Stage-13 hardening Task 1.3)
+
 ### Security
 
 - Bumped Go toolchain floor from 1.25.0 to 1.25.9. The previous floor

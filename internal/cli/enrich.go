@@ -58,6 +58,14 @@ type enrichOptions struct {
 	configPath   string // copied from root --config in RunE
 	noNetwork    bool
 	offlineDB    string
+	// includeRedundant records files that sit under an already-known
+	// package directory (default: skip — they belong to the existing
+	// component). Debug only. post-Stage-13 hardening Task 1.
+	includeRedundant bool
+	// includeNoise records files classified as docs / locale /
+	// metadata noise (LICENSE / README / *.h / *.map / ...).
+	// Debug only.
+	includeNoise bool
 }
 
 func newEnrichCommand() *cobra.Command {
@@ -103,6 +111,10 @@ add the others.`,
 		"Refuse outbound network calls (air-gapped mode)")
 	flags.StringVar(&opts.offlineDB, "offline-db", "",
 		"Path to offline catalogue (built via `astinus offline-db build`)")
+	flags.BoolVar(&opts.includeRedundant, "include-redundant", false,
+		"Record files inside already-known package directories (debug; default: skip)")
+	flags.BoolVar(&opts.includeNoise, "include-noise", false,
+		"Record LICENSE / README / locale / source / debug-symbol files (debug; default: skip)")
 
 	_ = cmd.MarkFlagRequired("sbom")
 	_ = cmd.MarkFlagRequired("image")
@@ -391,6 +403,10 @@ func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.
 	}
 	untrackedEnricher := untracked.NewWithOptions(untracked.Options{
 		Matcher: matcherChain,
+		Include: untracked.IncludeMask{
+			IncludeRedundant: opts.includeRedundant,
+			IncludeNoise:     opts.includeNoise,
+		},
 	})
 
 	cpeEnricher := cpe.New()

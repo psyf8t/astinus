@@ -34,6 +34,12 @@ const (
 	// The enricher still records it (with hash + name) so the SBOM
 	// at least mentions it.
 	CategoryUnknown
+	// CategoryRedundant marks a file that sits under an already-known
+	// package directory. Skipped by default (an Astinus
+	// component-per-file would just inflate the SBOM); opt back in
+	// via Options.IncludeRedundant for debug.
+	// post-Stage-13 hardening sprint Task 1.
+	CategoryRedundant
 )
 
 // Result is the outcome of classifying a single file.

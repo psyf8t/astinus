@@ -32,8 +32,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/psyf8t/astinus/internal/fingerprint"
 	"github.com/psyf8t/astinus/internal/fingerprint/matcher"
@@ -62,6 +64,9 @@ type Options struct {
 	// MaxFileBytes caps how many bytes we hash per file.
 	// Zero → DefaultMaxFileBytes.
 	MaxFileBytes int64
+	// Include selects which categories to record. Default mask
+	// excludes Redundant + Noise. post-Stage-13 hardening Task 1.
+	Include IncludeMask
 }
 
 // Enricher implements enrich.Enricher.
@@ -95,29 +100,15 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 		return fmt.Errorf("untracked: missing sbom/bundle/image")
 	}
 
-	known := collectKnownPaths(sbom)
-	added := 0
+	idx := buildKnownIndex(sbom)
+	stats := scanStats{start: time.Now(), byCategory: map[string]int{}}
 
 	visitor := func(ctx context.Context, fe layer.FileEntry, body io.Reader) error {
-		if e.opts.MaxComponents > 0 && added >= e.opts.MaxComponents {
-			return errLimitHit
-		}
-		if known[fe.Path] {
-			return nil
-		}
-		comp, ok, err := e.processFile(ctx, fe, body)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return nil
-		}
-		sbom.Components = append(sbom.Components, comp)
-		added++
-		return nil
+		return e.visit(ctx, sbom, idx, &stats, fe, body)
 	}
 
 	err := layer.WalkFiles(ctx, bundle.Image, visitor)
+	logScanStats(stats)
 	if errors.Is(err, errLimitHit) {
 		return nil // hit the cap — accept what we collected
 	}
@@ -125,6 +116,93 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 		return fmt.Errorf("untracked: walk: %w", err)
 	}
 	return nil
+}
+
+// visit runs the per-file pipeline (pre-pass filters → processFile →
+// append). Extracted from Enrich so the closure stays simple and the
+// linter is happy with cognitive complexity.
+func (e *Enricher) visit(ctx context.Context, sbom *model.SBOM, idx *knownIndex, stats *scanStats, fe layer.FileEntry, body io.Reader) error {
+	if e.opts.MaxComponents > 0 && stats.added >= e.opts.MaxComponents {
+		return errLimitHit
+	}
+	stats.scanned++
+
+	preReason, skip := e.preFilter(fe.Path, idx, stats)
+	if skip {
+		return nil
+	}
+
+	comp, ok, err := e.processFile(ctx, fe, body)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		stats.skippedClassifier++
+		return nil
+	}
+	if preReason != "" {
+		comp.Properties["astinus:untracked:filter-bypass"] = preReason
+	}
+	sbom.Components = append(sbom.Components, comp)
+	stats.added++
+	if cat := comp.Properties["astinus:untracked:category"]; cat != "" {
+		stats.byCategory[cat]++
+	}
+	return nil
+}
+
+// preFilter runs the redundancy + docs/metadata cheap pre-passes and
+// returns whether the visitor should skip this file. When the file is
+// kept under --include-redundant / --include-noise, returns the
+// reason string so the resulting Component can be stamped.
+func (e *Enricher) preFilter(filePath string, idx *knownIndex, stats *scanStats) (reason string, skip bool) {
+	if isRedundantAgainstIndex(filePath, idx) {
+		stats.redundant++
+		if !e.opts.Include.allow(CategoryRedundant) {
+			return "", true
+		}
+		reason = "redundant"
+	}
+	if isDocsOrMetadata(filePath) {
+		stats.noise++
+		if !e.opts.Include.allow(CategoryNoise) {
+			return "", true
+		}
+		if reason == "" {
+			reason = "noise"
+		}
+	}
+	return reason, false
+}
+
+// scanStats is the per-Enrich-call set of counters that drive the
+// `untracked.stats` log line. post-Stage-13 hardening Task 1 + Task 4.
+type scanStats struct {
+	start             time.Time
+	scanned           int
+	added             int
+	redundant         int
+	noise             int
+	skippedClassifier int
+	byCategory        map[string]int
+}
+
+func logScanStats(s scanStats) {
+	dur := time.Since(s.start)
+	throughput := 0.0
+	if dur > 0 {
+		throughput = float64(s.scanned) / dur.Seconds()
+	}
+	slog.Default().Info("untracked.stats",
+		"files_scanned", s.scanned,
+		"files_added", s.added,
+		"files_skipped_redundant", s.redundant,
+		"files_skipped_noise", s.noise,
+		"files_skipped_classifier", s.skippedClassifier,
+		"by_category", s.byCategory,
+		"duration_ms", dur.Milliseconds(),
+		"throughput_files_per_sec", int(throughput),
+	)
 }
 
 // processFile runs one file through "slurp → classify → hash →
@@ -144,7 +222,7 @@ func (e *Enricher) processFile(ctx context.Context, fe layer.FileEntry, body io.
 	cls := Classify(fe.Path, magic)
 
 	switch cls.Category {
-	case CategoryNoise, CategoryStaticArchive, CategoryConfig:
+	case CategoryNoise, CategoryStaticArchive, CategoryConfig, CategoryRedundant:
 		return model.Component{}, false, nil
 	case CategoryExecutable, CategoryArchive, CategoryScript,
 		CategoryLibrary, CategoryUnknown:
@@ -180,7 +258,7 @@ func enrichEmbedded(comp *model.Component, cat Category, body []byte) {
 			attachJARMetadata(comp, md)
 		}
 	case CategoryNoise, CategoryStaticArchive, CategoryScript,
-		CategoryLibrary, CategoryConfig, CategoryUnknown:
+		CategoryLibrary, CategoryConfig, CategoryUnknown, CategoryRedundant:
 		// no embedded-metadata extraction for these categories
 	}
 }
@@ -188,30 +266,6 @@ func enrichEmbedded(comp *model.Component, cat Category, body []byte) {
 // errLimitHit is the internal sentinel that aborts WalkFiles when
 // MaxComponents is reached.
 var errLimitHit = errors.New("untracked: max components reached")
-
-// collectKnownPaths gathers every Evidence.Locations path from sbom
-// (recursing into SubComponents) into a set keyed on the path the
-// untracked walker uses (no leading slash, normalised by callers
-// when feeding evidence).
-func collectKnownPaths(sbom *model.SBOM) map[string]bool {
-	out := map[string]bool{}
-	var visit func(comps []model.Component)
-	visit = func(comps []model.Component) {
-		for i := range comps {
-			c := &comps[i]
-			if c.Evidence != nil {
-				for _, loc := range c.Evidence.Locations {
-					out[normalize(loc.Path)] = true
-				}
-			}
-			if len(c.SubComponents) > 0 {
-				visit(c.SubComponents)
-			}
-		}
-	}
-	visit(sbom.Components)
-	return out
-}
 
 func normalize(p string) string {
 	p = strings.TrimPrefix(p, "./")
@@ -274,6 +328,8 @@ func categoryString(c Category) string {
 		return "static-archive"
 	case CategoryNoise:
 		return "noise"
+	case CategoryRedundant:
+		return "redundant"
 	default:
 		return "unknown"
 	}
