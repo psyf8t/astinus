@@ -161,8 +161,8 @@ The project is broken into 16 implementation stages. Current state:
 - ✅ **Stage 3**: Enrichment pipeline + Layer Attribution enricher + working `astinus enrich` end-to-end command
 - ✅ **Stage 4**: Untracked components detection — classify vendored binaries / archives / scripts, extract Go `buildinfo` and JAR `MANIFEST.MF`, pluggable hash → component matcher chain
 - ✅ **Stage 5**: Base image diff — auto-detects base from OCI labels, splits components into `base` / `app` / `unknown` via fast layer-prefix comparison with path-fallback for rebased images
-- ⬜ Stage 6 (next): CPE enrichment
-- ⬜ Stage 7: SPDX support
+- ✅ **Stage 6**: CPE enrichment — bundled hand-curated PURL → CPE mapping with per-PURL-type heuristic fallback; validates existing CPEs; resolver chain ready for offline-DB and online matchers
+- ⬜ Stage 7 (next): SPDX support
 - ⬜ Stages 8–15: Advanced auth, output formats, air-gapped mode, fingerprint matchers, policy framework, production polish
 
 The full specification with stage details and acceptance criteria is currently maintained as a private working document.
