@@ -78,7 +78,7 @@ add the others.`,
 	flags.StringVar(&opts.imageRef, "image", "", "Image reference (required)")
 	flags.StringVarP(&opts.outputPath, "output", "o", "-", "Path to output SBOM, or '-' for stdout")
 	flags.StringVar(&opts.outputFormat, "output-format", output.FormatSame,
-		"Output format: same|cyclonedx-json|cyclonedx-xml|spdx-json|spdx-tag-value")
+		"Output format: same|cyclonedx-json|cyclonedx-xml|spdx-json|spdx-tag-value|sarif|summary")
 	flags.StringSliceVar(&opts.enable, "enable", nil,
 		"Comma-separated list of enrichers to run (default: all known)")
 	flags.StringSliceVar(&opts.disable, "disable", nil,
