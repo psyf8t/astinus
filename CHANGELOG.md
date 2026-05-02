@@ -29,6 +29,19 @@ file is for cross-stage fixes that an operator might bisect against.
 
 ### Fixed
 
+- `--offline-db` load failures now surface as `ExitInvalidArgs`
+  instead of silently disabling the local matcher / CPE chain.
+  Air-gapped CI was previously vulnerable to a typo in the path
+  shipping a green build with empty enrichment. Both the
+  fingerprint matcher chain and the CPE chain now propagate the
+  error through to `enrich`'s exit code.
+  (post-stage-13 review F-011)
+- Local CPE dictionary loader now emits a `WARN cpe.local.skip`
+  log per file that fails to read, parse, or decode, and a final
+  `INFO cpe.local.loaded entries=N skipped=M` summary. Per-file
+  failures still don't abort the load (intentional — one typo in
+  a 10 000-entry catalogue should not lose the other 9 999), but
+  they are no longer invisible. (post-stage-13 review F-010)
 - SPDX JSON loader no longer panics on inputs where the upstream
   parser yields a nil entry inside the `packages` slice (e.g. some
   malformed documents the fuzzer found). The mapper now skips nil

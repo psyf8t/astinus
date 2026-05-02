@@ -1,9 +1,12 @@
 package cpe
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -126,5 +129,56 @@ func TestChainWithLocalSlotsBetweenBundledAndHeuristic(t *testing.T) {
 func TestPurlFromFileBaseEmpty(t *testing.T) {
 	if _, err := purlFromFileBase(""); err == nil {
 		t.Error("expected error for empty base")
+	}
+}
+
+// TestLoadFromDirSkipsCorruptEntriesWithWarn — corrupt JSON / bad
+// names must not abort the whole load, but they MUST emit warn
+// records via the configured logger. post-stage-13 review F-010.
+func TestLoadFromDirSkipsCorruptEntriesWithWarn(t *testing.T) {
+	dir := t.TempDir()
+	purlDir := filepath.Join(dir, "cpe", "by-purl")
+	if err := os.MkdirAll(purlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// One good entry.
+	good, _ := json.Marshal(localCPEEntry{Vendor: "co", Product: "good"})
+	if err := os.WriteFile(filepath.Join(purlDir, "pkg%3Anpm%2Fgood%401.json"), good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// One corrupt entry (not JSON).
+	if err := os.WriteFile(filepath.Join(purlDir, "pkg%3Anpm%2Fbad%401.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// One unparseable name (invalid percent-escape at the very end).
+	if err := os.WriteFile(filepath.Join(purlDir, "abc%ZZ.json"), good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture log records by handing the resolver a logger that
+	// writes JSON to a buffer.
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	r := NewLocalDictionaryResolver()
+	r.SetLogger(logger)
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+
+	// Expect: 1 good entry loaded, 2 skipped.
+	if r.Len() != 1 {
+		t.Errorf("Len = %d, want 1", r.Len())
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"msg":"cpe.local.skip"`) {
+		t.Error("expected at least one cpe.local.skip warn record")
+	}
+	if !strings.Contains(out, `"msg":"cpe.local.loaded"`) {
+		t.Error("expected cpe.local.loaded summary record")
+	}
+	if !strings.Contains(out, `"skipped":2`) {
+		t.Errorf("expected skipped:2 in summary; got: %s", out)
 	}
 }

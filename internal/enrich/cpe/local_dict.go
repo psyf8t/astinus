@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,16 @@ type LocalDictionaryResolver struct {
 	mu     sync.RWMutex
 	byPurl map[string]localCPEEntry
 	byName map[string]localCPEEntry
+
+	// logger receives per-file warn records on skip and one info
+	// record summarising the load. nil → slog.Default(). Set via
+	// SetLogger before LoadFromDir for non-default behaviour.
+	// post-stage-13 review F-010.
+	logger *slog.Logger
+
+	// skipped counts files dropped by the loader (read fail, JSON
+	// parse fail, name decode fail). Reported in the summary.
+	skipped int
 }
 
 // localCPEEntry is the on-disk record. Same shape as a bundled
@@ -38,7 +49,8 @@ type localCPEEntry struct {
 	Source  string `json:"source,omitempty"` // "nvd-cpe", "clearlydefined", etc.
 }
 
-// NewLocalDictionaryResolver returns an empty resolver.
+// NewLocalDictionaryResolver returns an empty resolver. Logger
+// defaults to slog.Default(); override via SetLogger.
 func NewLocalDictionaryResolver() *LocalDictionaryResolver {
 	return &LocalDictionaryResolver{
 		byPurl: map[string]localCPEEntry{},
@@ -46,10 +58,39 @@ func NewLocalDictionaryResolver() *LocalDictionaryResolver {
 	}
 }
 
+// SetLogger overrides the slog.Logger the resolver writes warn /
+// info records to during LoadFromDir. Pass nil to revert to
+// slog.Default().
+func (l *LocalDictionaryResolver) SetLogger(logger *slog.Logger) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.logger = logger
+}
+
+// log returns the effective logger (configured one or slog.Default).
+func (l *LocalDictionaryResolver) log() *slog.Logger {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.logger != nil {
+		return l.logger
+	}
+	return slog.Default()
+}
+
 // LoadFromDir reads every JSON entry under <root>/cpe/. Missing
 // directory is NOT an error (air-gapped operators may pass a path
 // that has not been built yet).
+//
+// Per-file failures (unreadable, malformed JSON, undecodable file
+// name) are skipped with a WARN log — air-gapped CI must be able
+// to tell when entries are silently lost. A summary INFO record
+// is emitted at the end with the final entry count and skip count.
+// post-stage-13 review F-010.
 func (l *LocalDictionaryResolver) LoadFromDir(root string) error {
+	l.mu.Lock()
+	l.skipped = 0
+	l.mu.Unlock()
+
 	cpeRoot := filepath.Join(root, "cpe")
 	info, err := os.Stat(cpeRoot)
 	if err != nil {
@@ -68,6 +109,12 @@ func (l *LocalDictionaryResolver) LoadFromDir(root string) error {
 	if err := l.loadByName(filepath.Join(cpeRoot, "by-name")); err != nil {
 		return err
 	}
+
+	l.log().Info("cpe.local.loaded",
+		"entries", l.Len(),
+		"skipped", l.skipped,
+		"root", cpeRoot,
+	)
 	return nil
 }
 
@@ -84,11 +131,13 @@ func (l *LocalDictionaryResolver) loadByPurl(dir string) error {
 		}
 		body, err := os.ReadFile(path) //nolint:gosec // path comes from filepath.WalkDir under a caller-supplied root
 		if err != nil {
+			l.recordSkip(path, "read", err)
 			return nil //nolint:nilerr // single-file failure shouldn't kill the whole load
 		}
 		var entry localCPEEntry
 		if err := json.Unmarshal(body, &entry); err != nil {
-			return nil //nolint:nilerr
+			l.recordSkip(path, "parse", err)
+			return nil //nolint:nilerr // single-file failure shouldn't kill the whole load
 		}
 		// Filename is the URL-encoded PURL (operator's choice). Use
 		// the file name minus extension as the lookup key after
@@ -96,7 +145,8 @@ func (l *LocalDictionaryResolver) loadByPurl(dir string) error {
 		base := strings.TrimSuffix(filepath.Base(path), ".json")
 		decoded, err := purlFromFileBase(base)
 		if err != nil {
-			return nil //nolint:nilerr
+			l.recordSkip(path, "decode-name", err)
+			return nil //nolint:nilerr // single-file failure shouldn't kill the whole load
 		}
 		l.mu.Lock()
 		l.byPurl[decoded] = entry
@@ -118,21 +168,25 @@ func (l *LocalDictionaryResolver) loadByName(dir string) error {
 		}
 		body, err := os.ReadFile(path) //nolint:gosec // path comes from filepath.WalkDir under a caller-supplied root
 		if err != nil {
-			return nil //nolint:nilerr
+			l.recordSkip(path, "read", err)
+			return nil //nolint:nilerr // single-file failure shouldn't kill the whole load
 		}
 		var entry localCPEEntry
 		if err := json.Unmarshal(body, &entry); err != nil {
-			return nil //nolint:nilerr
+			l.recordSkip(path, "parse", err)
+			return nil //nolint:nilerr // single-file failure shouldn't kill the whole load
 		}
 		// Layout: <dir>/<type>/<name>.json — relative path gives the
 		// (type, name) pair we key on.
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
-			return nil //nolint:nilerr
+			l.recordSkip(path, "rel-path", err)
+			return nil //nolint:nilerr // single-file failure shouldn't kill the whole load
 		}
 		rel = filepath.ToSlash(rel)
 		parts := strings.SplitN(rel, "/", 2)
 		if len(parts) != 2 {
+			l.recordSkip(path, "layout", fmt.Errorf("expected <type>/<name>.json under by-name root"))
 			return nil
 		}
 		typ := strings.ToLower(parts[0])
@@ -223,6 +277,16 @@ func unhex(c byte) (byte, error) {
 	return 0, fmt.Errorf("not a hex digit: %q", c)
 }
 
+// recordSkip increments the skipped counter and emits a WARN
+// log record so the operator sees lossy file-level failures.
+// post-stage-13 review F-010.
+func (l *LocalDictionaryResolver) recordSkip(path, op string, err error) {
+	l.mu.Lock()
+	l.skipped++
+	l.mu.Unlock()
+	l.log().Warn("cpe.local.skip", "path", path, "op", op, "err", err.Error())
+}
+
 // ChainWithLocal returns the canonical chain plus a LocalDictionary
 // resolver loaded from offlineDBRoot. Slot order is bundled →
 // local → heuristic so that:
@@ -231,15 +295,26 @@ func unhex(c byte) (byte, error) {
 //   - the operator's offline catalogue beats the heuristic,
 //   - the heuristic stays the last-resort fallback.
 //
-// When offlineDBRoot is empty OR the directory is missing /
-// unparseable, the function returns DefaultChain unchanged + nil
-// error — air-gapped callers don't get punished for not having
-// built the DB yet.
+// When offlineDBRoot is empty the function returns DefaultChain
+// unchanged + nil error. Genuine load failures (corrupt directory
+// layout, IO error stat'ing the root) are now propagated — air-
+// gapped CI must be able to refuse a broken catalogue rather than
+// silently fall through to bundled+heuristic only.
+// post-stage-13 review F-011.
 func ChainWithLocal(offlineDBRoot string) (*Chain, error) {
+	return ChainWithLocalAndLogger(offlineDBRoot, nil)
+}
+
+// ChainWithLocalAndLogger is ChainWithLocal with an explicit logger
+// for the resolver's load-time records. nil logger → slog.Default.
+func ChainWithLocalAndLogger(offlineDBRoot string, logger *slog.Logger) (*Chain, error) {
 	if offlineDBRoot == "" {
 		return DefaultChain(), nil
 	}
 	local := NewLocalDictionaryResolver()
+	if logger != nil {
+		local.SetLogger(logger)
+	}
 	if err := local.LoadFromDir(offlineDBRoot); err != nil {
 		return nil, err
 	}

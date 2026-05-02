@@ -155,7 +155,15 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 	logger.Info("image.opened", "ref", bundle.Reference.String())
 
 	// ── Step 3: build & run the pipeline ───────────────────────────
-	pipeline := enrich.NewPipeline(logger, allEnrichers(opts, sourceOpts)...)
+	enrichers, err := allEnrichers(ctx, opts, sourceOpts)
+	if err != nil {
+		// --offline-db / matcher-chain build failures must not be
+		// silently dropped — air-gapped CI must fail loudly when
+		// the catalogue it pointed at can't be loaded.
+		// post-stage-13 review F-011.
+		return newExitError(ExitInvalidArgs, err)
+	}
+	pipeline := enrich.NewPipeline(logger, enrichers...)
 	pipeline = enrich.NewPipeline(logger, enrich.Filter(
 		pipeline.Enrichers(),
 		stringSliceToSet(opts.enable),
@@ -369,15 +377,29 @@ func authProviderForRegistry(r cfgpkg.RegistryConfig) auth.CredentialProvider {
 // is unset.
 //
 // attribution → basediff → untracked → cpe.
-func allEnrichers(opts *enrichOptions, sourceOpts []source.Option) []enrich.Enricher {
+//
+// Returns an error when --offline-db points at a path the matcher or
+// CPE-chain loader cannot read; air-gapped CI must surface that
+// rather than silently fall back to default chains. post-stage-13
+// review F-011.
+func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.Option) ([]enrich.Enricher, error) {
+	logger := LoggerFrom(ctx)
+
+	matcherChain, err := buildFingerprintMatcher(ctx, opts)
+	if err != nil {
+		return nil, fmt.Errorf("fingerprint matcher chain: %w", err)
+	}
 	untrackedEnricher := untracked.NewWithOptions(untracked.Options{
-		Matcher: buildFingerprintMatcher(opts),
+		Matcher: matcherChain,
 	})
+
 	cpeEnricher := cpe.New()
 	if opts.offlineDB != "" {
-		if chain, err := cpe.ChainWithLocal(opts.offlineDB); err == nil {
-			cpeEnricher = cpe.NewWithResolver(chain)
+		chain, err := cpe.ChainWithLocalAndLogger(opts.offlineDB, logger)
+		if err != nil {
+			return nil, fmt.Errorf("--offline-db %q (cpe chain): %w", opts.offlineDB, err)
 		}
+		cpeEnricher = cpe.NewWithResolver(chain)
 	}
 
 	return []enrich.Enricher{
@@ -385,7 +407,7 @@ func allEnrichers(opts *enrichOptions, sourceOpts []source.Option) []enrich.Enri
 		basediff.NewWithOptions(basediffOptionsFor(opts, sourceOpts)),
 		untrackedEnricher,
 		cpeEnricher,
-	}
+	}, nil
 }
 
 // buildFingerprintMatcher composes the matcher chain for the
@@ -402,13 +424,19 @@ func allEnrichers(opts *enrichOptions, sourceOpts []source.Option) []enrich.Enri
 // matcher.ClearlyDefinedMatcher doc); we still wire it so the chain
 // shape is the one a future PURL-based ClearlyDefined integration
 // will inhabit.
-func buildFingerprintMatcher(opts *enrichOptions) matcher.Matcher {
+func buildFingerprintMatcher(_ context.Context, opts *enrichOptions) (matcher.Matcher, error) {
 	chain := matcher.NewChain()
 
 	if opts.offlineDB != "" {
-		if local, err := buildLocalMatcher(opts.offlineDB); err == nil {
-			chain.Append(local)
+		local, err := buildLocalMatcher(opts.offlineDB)
+		if err != nil {
+			// Surface the failure — air-gapped CI must not silently
+			// run with an empty local matcher when the operator
+			// explicitly pointed at one.
+			// post-stage-13 review F-011.
+			return nil, fmt.Errorf("--offline-db %q (matcher): %w", opts.offlineDB, err)
 		}
+		chain.Append(local)
 	}
 
 	if !opts.noNetwork {
@@ -432,7 +460,7 @@ func buildFingerprintMatcher(opts *enrichOptions) matcher.Matcher {
 	}
 
 	chain.Append(matcher.Null)
-	return chain
+	return chain, nil
 }
 
 // buildLocalMatcher loads the offline-db catalogue into a
