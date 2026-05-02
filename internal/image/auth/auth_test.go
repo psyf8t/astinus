@@ -286,11 +286,18 @@ func TestChainAppendAndProviders(t *testing.T) {
 func TestDefaultChainOrder(t *testing.T) {
 	c := DefaultChain()
 	provs := c.Providers()
-	if len(provs) != 2 {
-		t.Fatalf("expected 2 providers, got %d", len(provs))
+	got := make([]string, 0, len(provs))
+	for _, p := range provs {
+		got = append(got, p.Name())
 	}
-	if provs[0].Name() != "env" || provs[1].Name() != "docker-config" {
-		t.Errorf("default chain order = %v", []string{provs[0].Name(), provs[1].Name()})
+	want := []string{"env", "docker-config", "artifactory", "ecr", "gcr", "acr"}
+	if len(got) != len(want) {
+		t.Fatalf("DefaultChain length = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i, name := range want {
+		if got[i] != name {
+			t.Errorf("DefaultChain[%d] = %q, want %q (full: %v)", i, got[i], name, got)
+		}
 	}
 }
 

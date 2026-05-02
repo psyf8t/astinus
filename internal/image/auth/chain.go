@@ -79,12 +79,30 @@ func (c *Chain) Resolve(ctx context.Context, host string) (Credentials, error) {
 }
 
 // DefaultChain returns the chain used when the caller has no special
-// requirements: env vars first, then Docker config. The order matches
-// spec section 8.3 (the cloud-vendor providers added in Stage 9 will
-// slot in after this default chain).
+// requirements: env vars → Docker config → Artifactory env →
+// cloud-stub helpers (ECR / GCR / ACR).
+//
+// Order rationale:
+//
+//   - EnvProvider: most explicit. Per-host
+//     ASTINUS_REGISTRY_<HOST>_TOKEN beats anything else.
+//   - DockerConfigProvider: result of a previous `docker login` /
+//     `aws ecr get-login-password | docker login` etc. Stable
+//     fallback that already works for every cloud registry.
+//   - ArtifactoryProvider (Token mode by default): activates only
+//     for hosts whose name contains "artifactory". Reads
+//     ARTIFACTORY_TOKEN.
+//   - ECR / GCR / ACR stubs: recognise the host pattern and return
+//     a HELPFUL ErrNoCredentials pointing the operator to the
+//     working setup. They never produce credentials but they keep
+//     the SBOM-emitter informed about WHY auth is failing.
 func DefaultChain() *Chain {
 	return NewChain(
 		NewEnvProvider(),
 		NewDockerConfigProvider(),
+		NewArtifactoryProvider(ArtifactoryConfig{Mode: ArtifactoryToken}),
+		NewECRProvider(),
+		NewGCRProvider(),
+		NewACRProvider(),
 	)
 }
