@@ -72,6 +72,20 @@ func NewChain(matchers ...Matcher) *Chain {
 	return &Chain{matchers: append([]Matcher(nil), matchers...)}
 }
 
+// Append adds matchers to the end of the chain. Used by callers
+// that compose the chain incrementally based on runtime flags.
+func (c *Chain) Append(m ...Matcher) {
+	c.matchers = append(c.matchers, m...)
+}
+
+// Matchers returns the chain's matchers in order. The returned
+// slice is a copy.
+func (c *Chain) Matchers() []Matcher {
+	out := make([]Matcher, len(c.matchers))
+	copy(out, c.matchers)
+	return out
+}
+
 // Name implements Matcher.
 func (c *Chain) Name() string { return "chain" }
 

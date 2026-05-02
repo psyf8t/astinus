@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -345,16 +346,17 @@ func authProviderForRegistry(r cfgpkg.RegistryConfig) auth.CredentialProvider {
 // allEnrichers returns the canonical list of enrichers in execution
 // order. Stage 12 plumbs --offline-db into both untracked
 // (LocalMatcher) and cpe (LocalDictionaryResolver in the chain).
+// Stage 13 prepends Software Heritage + ClearlyDefined matchers
+// (cached + rate-limited) to the untracked chain when --no-network
+// is unset.
 //
 // attribution → basediff → untracked → cpe.
 func allEnrichers(opts *enrichOptions, sourceOpts []source.Option) []enrich.Enricher {
-	untrackedEnricher := untracked.New()
+	untrackedEnricher := untracked.NewWithOptions(untracked.Options{
+		Matcher: buildFingerprintMatcher(opts),
+	})
 	cpeEnricher := cpe.New()
-
 	if opts.offlineDB != "" {
-		if matcher, err := buildLocalMatcher(opts.offlineDB); err == nil {
-			untrackedEnricher = untracked.NewWithOptions(untracked.Options{Matcher: matcher})
-		}
 		if chain, err := cpe.ChainWithLocal(opts.offlineDB); err == nil {
 			cpeEnricher = cpe.NewWithResolver(chain)
 		}
@@ -366,6 +368,53 @@ func allEnrichers(opts *enrichOptions, sourceOpts []source.Option) []enrich.Enri
 		untrackedEnricher,
 		cpeEnricher,
 	}
+}
+
+// buildFingerprintMatcher composes the matcher chain for the
+// untracked enricher.
+//
+// Order:
+//
+//	[local from --offline-db when set]
+//	  → [SWH cached+rate-limited when --no-network is unset]
+//	  → [ClearlyDefined cached+rate-limited when --no-network is unset]
+//	  → matcher.Null
+//
+// Stage 13 ClearlyDefined is a diagnostic stub (see
+// matcher.ClearlyDefinedMatcher doc); we still wire it so the chain
+// shape is the one a future PURL-based ClearlyDefined integration
+// will inhabit.
+func buildFingerprintMatcher(opts *enrichOptions) matcher.Matcher {
+	chain := matcher.NewChain()
+
+	if opts.offlineDB != "" {
+		if local, err := buildLocalMatcher(opts.offlineDB); err == nil {
+			chain.Append(local)
+		}
+	}
+
+	if !opts.noNetwork {
+		client := &http.Client{Timeout: 30 * time.Second}
+		swh := matcher.NewCached(
+			matcher.NewRateLimited(
+				matcher.NewSWHMatcher("", client),
+				matcher.RateLimitOptions{},
+			),
+			matcher.CacheOptions{},
+		)
+		cd := matcher.NewCached(
+			matcher.NewRateLimited(
+				matcher.NewClearlyDefinedMatcher("", client),
+				matcher.RateLimitOptions{},
+			),
+			matcher.CacheOptions{},
+		)
+		chain.Append(swh)
+		chain.Append(cd)
+	}
+
+	chain.Append(matcher.Null)
+	return chain
 }
 
 // buildLocalMatcher loads the offline-db catalogue into a
