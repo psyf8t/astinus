@@ -34,6 +34,7 @@ import (
 	"github.com/psyf8t/astinus/internal/sbom/cyclonedx"
 	"github.com/psyf8t/astinus/internal/sbom/model"
 	"github.com/psyf8t/astinus/internal/sbom/spdx"
+	"github.com/psyf8t/astinus/internal/telemetry"
 )
 
 // Enrich exit codes — extends the spec section 6.4 enumeration.
@@ -96,6 +97,20 @@ type enrichOptions struct {
 	// values are one of `critical`, `high`, `medium`, `low`,
 	// `info`. PRSD-Task-7.
 	failOn string
+	// metricsOutput controls how the in-process Prometheus
+	// registry is exposed at the end of the run. Forms:
+	//
+	//   ""                     → metrics disabled (default)
+	//   "stdout" / "stderr"    → write Prometheus text exposition
+	//   "file:/path/to/file"   → write to the given file
+	//
+	// Bound by --metrics-output. PRSD-Task-8.
+	metricsOutput string
+	// tracingEndpoint sets the OpenTelemetry collector endpoint.
+	// Empty disables tracing (NoopTracer is used). Today the
+	// endpoint is recorded but no exporter is wired in — see
+	// ADR-0026 for the OTel deferral. PRSD-Task-8.
+	tracingEndpoint string
 }
 
 func newEnrichCommand() *cobra.Command {
@@ -155,6 +170,10 @@ add the others.`,
 		"NVD API key (env: NVD_API_KEY). Higher rate limit (50 req / 30s vs 5 req / 30s)")
 	flags.StringVar(&opts.failOn, "fail-on", "",
 		"Exit non-zero when any compliance finding meets this severity: critical | high | medium | low | info (default: never fail)")
+	flags.StringVar(&opts.metricsOutput, "metrics-output", "",
+		"Where to emit Prometheus text-format metrics at end of run: stdout | stderr | file:/path (default: disabled)")
+	flags.StringVar(&opts.tracingEndpoint, "tracing-endpoint", "",
+		"OpenTelemetry collector endpoint (default: disabled — see ADR-0026)")
 
 	_ = cmd.MarkFlagRequired("sbom")
 	_ = cmd.MarkFlagRequired("image")
@@ -222,9 +241,21 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 		stringSliceToSet(opts.disable),
 	)...)
 
+	// PRSD-Task-8: opt-in observability. Metrics + tracing only
+	// fire when the operator passes the corresponding flag; the
+	// no-op tracer is zero-cost and the metrics registry is nil.
+	registry := configureMetrics(opts.metricsOutput, pipeline)
+	configureTracing(opts.tracingEndpoint, pipeline, logger)
+
 	if err := pipeline.Run(ctx, sbom, bundle); err != nil {
+		// Even on failure we want to write any metrics already
+		// observed — operators dashboarding error rates need the
+		// counter increment to land. Errors during export are
+		// logged but do not mask the original Run error.
+		writeMetrics(opts.metricsOutput, registry, logger)
 		return newExitError(ExitEnrich, err)
 	}
+	writeMetrics(opts.metricsOutput, registry, logger)
 
 	// ── Step 4: render & write the output ──────────────────────────
 	formatName := opts.outputFormat
@@ -736,6 +767,98 @@ func basediffOptionsFor(opts *enrichOptions, sourceOpts []source.Option) basedif
 			SourceOpts: sourceOpts,
 		}
 	}
+}
+
+// configureMetrics returns the *telemetry.Registry the pipeline
+// should publish to, or nil when --metrics-output is empty. Also
+// binds the registry to the pipeline so per-enricher metrics fire.
+//
+// PRSD-Task-8.
+func configureMetrics(output string, pipeline *enrich.Pipeline) *telemetry.Registry {
+	if output == "" {
+		return nil
+	}
+	reg := telemetry.NewRegistry()
+	pipeline.WithMetrics(reg)
+	return reg
+}
+
+// configureTracing wires the pipeline's tracer based on --tracing-endpoint.
+// Today every endpoint resolves to NoopTracer (OTel is deferred —
+// see ADR-0026); the operator gets a single-line warning so the
+// absence of spans is explicit rather than silent.
+//
+// PRSD-Task-8.
+func configureTracing(endpoint string, pipeline *enrich.Pipeline, logger *slog.Logger) {
+	tr, deferred := telemetry.InitTracing(endpoint)
+	pipeline.WithTracer(tr)
+	switch {
+	case endpoint == "":
+		// Tracing not requested — no log noise.
+		return
+	case deferred:
+		logger.Warn(telemetry.EventTracingDisabled,
+			"endpoint", endpoint,
+			"reason", "OpenTelemetry exporter not compiled in (see ADR-0026)")
+	default:
+		logger.Info(telemetry.EventTracingInit, "endpoint", endpoint)
+	}
+}
+
+// writeMetrics emits the registry's contents to the operator-chosen
+// sink. A registry-nil call is a no-op (metrics were never enabled).
+//
+// Output forms:
+//
+//	stdout / stderr     → corresponding os.File
+//	file:/abs/path      → opened O_CREATE|O_TRUNC|O_WRONLY 0644
+//	(other)             → ExitInvalidArgs-like log warning, no file
+//
+// Errors writing the metrics are logged but do not abort the run —
+// the SBOM is the primary artefact; metrics are diagnostic.
+func writeMetrics(output string, reg *telemetry.Registry, logger *slog.Logger) {
+	if reg == nil {
+		return
+	}
+	w, closer, err := openMetricsSink(output)
+	if err != nil {
+		logger.Warn("metrics.exported", "error", err.Error())
+		return
+	}
+	if closer != nil {
+		defer func() { _ = closer.Close() }()
+	}
+	if err := reg.ExportPrometheus(w); err != nil {
+		logger.Warn(telemetry.EventMetricsExported, "error", err.Error())
+		return
+	}
+	logger.Info(telemetry.EventMetricsExported,
+		"sink", output,
+		"metrics", len(reg.Names()))
+}
+
+// openMetricsSink resolves the --metrics-output value to an
+// io.Writer + an optional Closer the caller must close. Returns an
+// error for unrecognised forms; never returns a nil writer alongside
+// a nil error.
+func openMetricsSink(spec string) (io.Writer, io.Closer, error) {
+	switch spec {
+	case "stdout":
+		return os.Stdout, nil, nil
+	case "stderr":
+		return os.Stderr, nil, nil
+	}
+	if rest, ok := strings.CutPrefix(spec, "file:"); ok {
+		if rest == "" {
+			return nil, nil, fmt.Errorf("--metrics-output: empty file path")
+		}
+		f, err := os.OpenFile(rest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644) //nolint:gosec // operator-chosen path
+		if err != nil {
+			return nil, nil, fmt.Errorf("--metrics-output: %w", err)
+		}
+		return f, f, nil
+	}
+	return nil, nil, fmt.Errorf("--metrics-output %q: want stdout|stderr|file:/path", spec)
 }
 
 // stringSliceToSet turns a comma-separated CLI slice into a set,
