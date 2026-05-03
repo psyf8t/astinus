@@ -45,4 +45,12 @@ const (
 	// builds get "medium".
 	PropertyAttributionConfidence = "astinus:attribution:confidence"
 	PropertyAttributionReason     = "astinus:attribution:reason"
+
+	// Base-image diff strategy + per-component forensic evidence
+	// (PRSD Task 2). Strategy stamps the SBOM-level Metadata; the
+	// other three live on the matched Component.
+	PropertyBasediffStrategy        = "astinus:basediff:strategy"
+	PropertyBasediffMatchedBasePath = "astinus:basediff:matched-base-path"
+	PropertyBasediffState           = "astinus:basediff:state"
+	PropertyBasediffConfidence      = "astinus:basediff:confidence"
 )

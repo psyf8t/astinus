@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/psyf8t/astinus/internal/enrich/basediff/contenthash"
 	"github.com/psyf8t/astinus/internal/image"
 	"github.com/psyf8t/astinus/internal/image/layer"
 	"github.com/psyf8t/astinus/internal/image/source"
@@ -49,7 +50,18 @@ func (*Enricher) Name() string { return Name }
 // Always returns nil — basediff is best-effort. Failures (no
 // detected base, base unreachable, etc.) downgrade to "everyone is
 // unknown" or, when target labels carry a base.digest, the partial
-// mode heuristic. post-Stage-13 hardening Task 3.
+// mode heuristic.
+//
+// Strategy (PRSD-Task-2): when the base image loads successfully,
+// run the content-addressable diff first — hash every visible file
+// in both images, classify SBOM components by SHA-256 match. This
+// works on multi-stage / squashed / distroless builds where the
+// legacy layer-prefix and path-fallback diffs misclassify.
+//
+// If the content scan fails (e.g. the base image has too many
+// files to hash within memory limits, or a layer is unreadable),
+// fall back to layer.ComputeDiff (prefix → path-fallback) to
+// preserve the Hardening-Sprint-1 behaviour.
 func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.Bundle) error {
 	if sbom == nil || bundle == nil || bundle.Image == nil {
 		return fmt.Errorf("basediff: missing sbom/bundle/image")
@@ -64,21 +76,31 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 	baseRef, err := e.resolveBaseRef(bundle)
 	if err != nil || baseRef == "" {
 		e.handleNoBase(logger, sbom, baseRef, err)
+		stampStrategy(sbom, "unavailable")
 		return nil
 	}
 
 	baseBundle, openErr := image.Open(ctx, baseRef, sbom, e.opts.SourceOpts...)
 	if openErr != nil {
 		e.handleBaseUnreachable(ctx, logger, sbom, bundle, baseRef, openErr)
+		stampStrategy(sbom, "unavailable")
 		return nil
 	}
 	defer func() { _ = baseBundle.Close() }()
 
+	if e.runContentStrategy(ctx, logger, sbom, bundle, baseBundle, baseRef) {
+		stampStrategy(sbom, "content")
+		return nil
+	}
+
+	// Tier-2 fallback: the content scan could not run (typically a
+	// layer read error). Use the legacy prefix / path diff.
 	diff, diffErr := layer.ComputeDiff(ctx, bundle.Image, baseBundle.Image)
 	if diffErr != nil {
 		logFallback(logger, "compute-diff-failed", baseRef, diffErr,
 			"diff computation failed; rerun with --log-level=debug for details")
 		stampUnknown(sbom)
+		stampStrategy(sbom, "unavailable")
 		return nil
 	}
 
@@ -94,7 +116,144 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 	}
 
 	stampOrigin(sbom, diff)
+	stampStrategy(sbom, "path-fallback")
 	return nil
+}
+
+// runContentStrategy executes the content-addressable diff. Returns
+// true when the strategy completed (success path; the SBOM has been
+// stamped); false when the caller should fall through to the legacy
+// path-based diff.
+//
+// The strategy:
+//
+//  1. BaseSet ← BuildBaseSet(baseImage)  — every visible base file
+//     hashed and indexed by SHA-256 plus by path.
+//  2. targetHashes ← ScanTarget(targetImage) — every visible target
+//     file hashed.
+//  3. For each component, walk its known paths (Evidence.Locations
+//     and Syft `syft:location:N:path` properties). For each path:
+//     look up the target's hash → query the BaseSet. First hash
+//     hit wins, the matching base path is stamped on the component
+//     as forensic evidence.
+//  4. When no path's hash matched but at least one target path
+//     ALSO appears in the base image's path index, the file was
+//     modified at the same location → Origin=base, with
+//     `astinus:basediff:state=modified`.
+//  5. Otherwise → Origin=app.
+func (e *Enricher) runContentStrategy(ctx context.Context, logger *slog.Logger, sbom *model.SBOM, bundle, baseBundle *image.Bundle, baseRef string) bool {
+	baseSet, err := contenthash.BuildBaseSet(ctx, baseBundle.Image)
+	if err != nil {
+		logFallback(logger, "content-base-scan-failed", baseRef, err,
+			"falling back to layer-prefix / path-based diff")
+		return false
+	}
+	targetHashes, err := contenthash.ScanTarget(ctx, bundle.Image)
+	if err != nil {
+		logFallback(logger, "content-target-scan-failed", baseRef, err,
+			"falling back to layer-prefix / path-based diff")
+		return false
+	}
+
+	stats := contentStats{}
+	walkComponents(sbom.Components, func(c *model.Component) {
+		c.Origin = e.classifyComponent(c, baseSet, targetHashes, &stats)
+		switch c.Origin {
+		case model.OriginBaseImage:
+			stats.base++
+		case model.OriginApplication:
+			stats.app++
+		default:
+			stats.unknown++
+		}
+	})
+
+	logger.Info("basediff.content",
+		"base", baseRef,
+		"base_files_indexed", baseSet.Size(),
+		"base_paths_indexed", baseSet.PathCount(),
+		"target_files_hashed", len(targetHashes),
+		"components_total", len(sbom.Components),
+		"matched_base", stats.base,
+		"matched_base_modified", stats.modified,
+		"app", stats.app,
+		"unknown", stats.unknown,
+	)
+	return true
+}
+
+// contentStats counts component classifications produced by the
+// content-addressable strategy. Used for the basediff.content log
+// line; not surfaced into the SBOM directly.
+type contentStats struct {
+	base, modified, app, unknown int
+}
+
+// classifyComponent returns the Origin for c under the
+// content-addressable strategy. Side effects: stamps
+// `astinus:basediff:matched-base-path` (on a hash hit) or
+// `astinus:basediff:state=modified` (when only the path matched).
+//
+// LayerInfo == nil is fine — content classification doesn't need
+// layer indices, only file paths and hashes.
+func (e *Enricher) classifyComponent(c *model.Component, baseSet *contenthash.BaseSet, targetHashes map[string]string, stats *contentStats) model.Origin {
+	paths := pathsForComponent(c)
+	if len(paths) == 0 {
+		return model.OriginUnknown
+	}
+
+	pathInBase := false
+	for _, p := range paths {
+		key := layer.NormalizePath(p)
+		if key == "" {
+			continue
+		}
+		hash, ok := targetHashes[key]
+		if ok {
+			if ev, hit := baseSet.Contains(hash); hit {
+				if c.Properties == nil {
+					c.Properties = map[string]string{}
+				}
+				c.Properties[model.PropertyBasediffMatchedBasePath] = ev.BasePath
+				return model.OriginBaseImage
+			}
+		}
+		if baseSet.HasPath(key) {
+			// Target carries a file at a path the base image also
+			// uses, but the bytes don't match. Modified at the same
+			// location.
+			pathInBase = true
+		}
+	}
+	if pathInBase {
+		if c.Properties == nil {
+			c.Properties = map[string]string{}
+		}
+		c.Properties[model.PropertyBasediffState] = "modified"
+		stats.modified++
+		return model.OriginBaseImage
+	}
+	return model.OriginApplication
+}
+
+// RunContentStrategyForTest is the export hook the integration
+// suite uses to drive the content-addressable strategy with
+// pre-built target / base bundles, bypassing image.Open. Production
+// code calls runContentStrategy via Enrich; this wrapper exists
+// only because the integration tests live in a separate `_test`
+// package that cannot reach unexported methods.
+func RunContentStrategyForTest(ctx context.Context, sbom *model.SBOM, bundle, baseBundle *image.Bundle, baseRef string) bool {
+	return (&Enricher{}).runContentStrategy(ctx, slog.Default(), sbom, bundle, baseBundle, baseRef)
+}
+
+// stampStrategy records which strategy actually ran on
+// sbom.Metadata.Properties. Operators consume this to tell apart
+// "content match worked" from "fell back to path matching".
+func stampStrategy(sbom *model.SBOM, strategy string) {
+	if sbom.Metadata.Properties == nil {
+		sbom.Metadata.Properties = map[string]string{}
+	}
+	sbom.Metadata.Properties[model.PropertyBasediffStrategy] = strategy
 }
 
 // handleNoBase covers ModeAuto with no labels and ModeExplicit with

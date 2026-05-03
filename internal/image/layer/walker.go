@@ -244,6 +244,13 @@ func removePrefixFromPriorLayers(m *FileMap, prefix string, currentLayer int) {
 	}
 }
 
+// NormalizePath is the package's path-normalisation helper, exported
+// so cross-package callers (the basediff content strategy) can match
+// FileMap keys without re-implementing the same canonicalisation.
+//
+// Returns "" for "" and ".". See normalizePath for the full rule set.
+func NormalizePath(p string) string { return normalizePath(p) }
+
 // normalizePath turns various wire spellings into the canonical
 // (slash-separated, no leading "/", no leading "./") form we use as
 // map keys.
