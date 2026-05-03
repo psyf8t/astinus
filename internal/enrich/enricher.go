@@ -33,6 +33,17 @@ type Enricher interface {
 	// (`astinus:<name>:*`).
 	Name() string
 
+	// Dependencies declares which other enrichers MUST run before
+	// this one. Each entry is the dependency's `Name()`. The
+	// pipeline runs `TopoSort` before dispatch and refuses to
+	// start when a declared dependency is missing or when the
+	// graph has a cycle (PRSD-Task-6).
+	//
+	// Return nil (or an empty slice) for an enricher that doesn't
+	// need ordering hints — it will run in input order relative
+	// to its peers.
+	Dependencies() []string
+
 	// Enrich mutates sbom. It SHOULD return early on context
 	// cancellation. It MAY do I/O (read layers, look up CPEs);
 	// pipeline-level instrumentation lives in pipeline.go.

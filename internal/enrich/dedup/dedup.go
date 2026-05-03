@@ -41,6 +41,13 @@ func New() *Enricher { return &Enricher{} }
 // Name implements enrich.Enricher.
 func (*Enricher) Name() string { return Name }
 
+// Dependencies implements enrich.Enricher. PRSD-Task-6: dedup is
+// the finalize stage — it MUST run AFTER basediff (which sets
+// Origin) and AFTER cpe (which adds CPEs that participate in the
+// dedup key). Declaring both deps lets `TopoSort` place dedup
+// last regardless of input order.
+func (*Enricher) Dependencies() []string { return []string{"basediff", "cpe"} }
+
 // Enrich implements enrich.Enricher. The bundle is unused; dedup
 // works purely on the in-memory SBOM.
 func (e *Enricher) Enrich(_ context.Context, sbom *model.SBOM, _ *image.Bundle) error {

@@ -42,6 +42,14 @@ func NewWithResolver(r Resolver) *Enricher { return &Enricher{chain: r} }
 // Name implements enrich.Enricher.
 func (*Enricher) Name() string { return Name }
 
+// Dependencies implements enrich.Enricher. PRSD-Task-6: cpe needs
+// PURLs on every Component the SBOM carries — the multi-modal
+// extractors (PRSD-Task-4, wired into untracked.processFile) are
+// the source of those PURLs for binary-shaped untracked entries.
+// Declaring "untracked" guarantees we only resolve once the PURLs
+// are populated.
+func (*Enricher) Dependencies() []string { return []string{"untracked"} }
+
 // Enrich implements enrich.Enricher.
 //
 // bundle is required for signature compatibility with the pipeline

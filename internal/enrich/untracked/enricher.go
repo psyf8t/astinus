@@ -191,6 +191,13 @@ func NewWithOptions(o Options) *Enricher {
 // Name implements enrich.Enricher.
 func (*Enricher) Name() string { return Name }
 
+// Dependencies implements enrich.Enricher. Untracked walks the
+// image directly via `layer.WalkFiles` and records its own
+// LayerInfo per discovered file — it doesn't read attribution's
+// output. PRSD-Task-6: declaring no deps lets the topo sort place
+// untracked alongside attribution rather than after it.
+func (*Enricher) Dependencies() []string { return nil }
+
 // Enrich implements enrich.Enricher.
 func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.Bundle) error {
 	if sbom == nil || bundle == nil || bundle.Image == nil {

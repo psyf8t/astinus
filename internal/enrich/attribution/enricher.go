@@ -51,6 +51,11 @@ func New() *Enricher { return &Enricher{} }
 // Name implements enrich.Enricher.
 func (e *Enricher) Name() string { return Name }
 
+// Dependencies implements enrich.Enricher. Attribution is the root
+// of the enrichment graph — it derives `LayerInfo` from the image
+// directly and depends on no other enricher's output.
+func (*Enricher) Dependencies() []string { return nil }
+
 // Enrich implements enrich.Enricher.
 //
 // Walks the image's layers, builds a path → layer map, then iterates

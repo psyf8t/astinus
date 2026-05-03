@@ -45,6 +45,13 @@ func NewWithOptions(o Options) *Enricher { return &Enricher{opts: o} }
 // Name implements enrich.Enricher.
 func (*Enricher) Name() string { return Name }
 
+// Dependencies implements enrich.Enricher. PRSD-Task-6: basediff
+// MUST run AFTER untracked so the content-addressable strategy
+// can classify untracked-added components, not just the Syft set.
+// The Hardening-Sprint-1 order ran basediff first; the topo sort
+// reorders so the new dep is honoured.
+func (*Enricher) Dependencies() []string { return []string{"untracked"} }
+
 // Enrich implements enrich.Enricher.
 //
 // Always returns nil — basediff is best-effort. Failures (no

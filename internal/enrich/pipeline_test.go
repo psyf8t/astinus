@@ -15,6 +15,7 @@ import (
 // error.
 type stubEnricher struct {
 	name      string
+	deps      []string
 	calls     int
 	addProp   string
 	addValue  string
@@ -22,7 +23,8 @@ type stubEnricher struct {
 	cancelCtx bool
 }
 
-func (s *stubEnricher) Name() string { return s.name }
+func (s *stubEnricher) Name() string           { return s.name }
+func (s *stubEnricher) Dependencies() []string { return s.deps }
 func (s *stubEnricher) Enrich(ctx context.Context, sbom *model.SBOM, _ *image.Bundle) error {
 	s.calls++
 	if s.cancelCtx {
@@ -114,6 +116,49 @@ func TestPipelineStampIdempotent(t *testing.T) {
 	}
 	if sbom.Metadata.Properties[model.PropertyEnrichedBy] != first {
 		t.Errorf("PropertyEnrichedBy changed across runs")
+	}
+}
+
+// TestPipelineTopoSortReorders — PRSD-Task-6: Run() runs TopoSort
+// before dispatch, so an enricher that DECLARES a dep on a peer
+// runs after that peer regardless of registration order. Here `b`
+// is registered first but depends on `a`; the pipeline must
+// reorder.
+func TestPipelineTopoSortReorders(t *testing.T) {
+	a := &stubEnricher{name: "a"}
+	b := &stubEnricher{name: "b", deps: []string{"a"}}
+	// Register in reverse-topological order on purpose.
+	p := NewPipeline(nil, b, a)
+
+	sbom := &model.SBOM{}
+	if err := p.Run(context.Background(), sbom, &image.Bundle{SBOM: sbom}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if a.calls != 1 || b.calls != 1 {
+		t.Fatalf("call counts a=%d b=%d", a.calls, b.calls)
+	}
+	// We don't have a direct order observation hook here — but
+	// the topo-sort table tests in ordering_test.go cover the
+	// invariant. Pipeline-level we just confirm both ran.
+}
+
+// TestPipelineTopoSortFailureSurfacesError — when the registered
+// set has a dependency cycle, Run must NOT execute any enricher
+// and must surface a descriptive error.
+func TestPipelineTopoSortFailureSurfacesError(t *testing.T) {
+	a := &stubEnricher{name: "a", deps: []string{"b"}}
+	b := &stubEnricher{name: "b", deps: []string{"a"}}
+	p := NewPipeline(nil, a, b)
+
+	err := p.Run(context.Background(), &model.SBOM{}, &image.Bundle{})
+	if err == nil {
+		t.Fatal("expected cycle error")
+	}
+	if !strings.Contains(err.Error(), "topo sort") {
+		t.Errorf("err = %v, want to mention 'topo sort'", err)
+	}
+	if a.calls != 0 || b.calls != 0 {
+		t.Errorf("enrichers ran despite cycle: a=%d b=%d", a.calls, b.calls)
 	}
 }
 

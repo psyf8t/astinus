@@ -64,8 +64,19 @@ func (p *Pipeline) Run(ctx context.Context, sbom *model.SBOM, bundle *image.Bund
 		return errors.New("pipeline: nil bundle")
 	}
 
+	// PRSD-Task-6: re-order via topological sort over each
+	// enricher's `Dependencies()` declaration. The sort preserves
+	// input order for tie-breaks (peers with no real dependency
+	// stay in registration order) so operators see predictable
+	// behaviour when no dep forces an order.
+	ordered, err := TopoSort(p.enrichers)
+	if err != nil {
+		return fmt.Errorf("pipeline: topo sort: %w", err)
+	}
+	p.logger.Info("pipeline.order", "order", enricherNames(ordered))
+
 	totalStart := time.Now()
-	for _, e := range p.enrichers {
+	for _, e := range ordered {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -113,6 +124,17 @@ func stampMetadata(sbom *model.SBOM) {
 	// consumers can tell which Astinus version touched the SBOM most
 	// recently. Reading it back via the cyclonedx mapper is safe.
 	sbom.Metadata.Properties[model.PropertyEnrichedVersion] = currentVersion()
+}
+
+// enricherNames returns the slice of `Name()` values in their
+// current order. Used for the `pipeline.order` log line so
+// operators can see the sort's effective output.
+func enricherNames(enrichers []Enricher) []string {
+	out := make([]string, len(enrichers))
+	for i, e := range enrichers {
+		out[i] = e.Name()
+	}
+	return out
 }
 
 // Filter returns a new slice containing only the enrichers whose
