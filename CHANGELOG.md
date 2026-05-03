@@ -4,6 +4,69 @@ All notable post-stage fixes that change observable behaviour. Stage
 deliverables themselves are tracked in the implementation log; this
 file is for cross-stage fixes that an operator might bisect against.
 
+## v0.2.0 — 2026-05-03 (Production Readiness Sprint)
+
+The Production Readiness Sprint (PRSD-Task-0..9) closes Track A
+(industry compliance), Track B (vulnerability-scanning quality)
+and Track C (forensic-grade attribution) and lands the unified
+observability layer the spec called for. v0.2.0 is the first
+release suitable for production CI pipelines.
+
+### Added — net-new functionality
+
+- **Multi-runtime image normalization** (PRSD-Task-0): runtime
+  detection across Docker / BuildKit / Podman / Buildah / Kaniko;
+  attribution-confidence stamping; provenance round-trip. ADR-0018.
+- **Declarative path classifier** (PRSD-Task-1): YAML-driven rule
+  bundles, `--rules-file` flag, character-trie dispatch. ADR-0019.
+- **Content-addressable basediff** (PRSD-Task-2): SHA-256 across
+  paired images, multi-stage `COPY --from` survives squash, in-tree
+  Bloom filter. ADR-0020.
+- **Filesystem-aware clustering** (PRSD-Task-3): 9-anchor +
+  density-scoring untracked pre-pass. `--no-cluster` flag,
+  `astinus:cluster:*` properties. ADR-0021.
+- **Multi-modal binary extractor** (PRSD-Task-4): Go buildinfo +
+  Rust `.dep-v0` + Java 3-tier + Python METADATA + ELF + PE
+  registry. ADR-0022.
+- **CPE online/offline/hybrid modes** (PRSD-Task-5): pluggable
+  Source registry; in-tree token-bucket rate limiter; NVD API +
+  ClearlyDefined sources; `--cpe-mode` and `--nvd-api-key` flags.
+  ADR-0023.
+- **Topological pipeline ordering** (PRSD-Task-6): `Enricher.Dependencies()`
+  + in-tree TopoSort (Kahn's, stable input-order tie-break);
+  `pipeline.order` log line. ADR-0024.
+- **Compliance validation framework** (PRSD-Task-7): NTIA, EU CRA,
+  CycloneDX-structural, SPDX-structural validators; `--fail-on`
+  gate; per-finding SBOM properties. ADR-0025.
+- **Unified observability and telemetry** (PRSD-Task-8): event
+  vocabulary constants; in-tree Prometheus registry +
+  `--metrics-output stdout|stderr|file:/path`; tracing stub
+  (OTel deferred); `--tracing-endpoint` flag; static "no stdlib
+  log" enforcement. ADR-0026.
+- **Acceptance test suite** (PRSD-Task-9): 8 image-type tests +
+  3 external validators + 3 vuln scanners + 5-runtime matrix +
+  perf benchmarks; `acceptance.yml` nightly CI workflow.
+  ADR-0027.
+
+### Changed
+
+- Production CLI now exposes `--rules-file`, `--no-cluster`,
+  `--cpe-mode`, `--nvd-api-key`, `--fail-on`, `--metrics-output`,
+  `--tracing-endpoint` (additive — every existing flag still
+  works the same way).
+- Pipeline `Run` migrated to `telemetry.Event*` constants for
+  every emitted log; opt-in `WithMetrics` / `WithTracer`
+  builders attach observability per-run.
+
+### Notes
+
+- No new third-party dependencies were added across the entire
+  sprint (PRSD-Task-1..9). Bounded algorithms (trie, bloom,
+  TOML, extractors, token-bucket, topo-sort, structural
+  validators, Prometheus exposition, tracing stub) are in-tree;
+  same precedent that kept the binary at ~12 MiB despite ten
+  new internal packages.
+
 ## Unreleased
 
 ### Performance
