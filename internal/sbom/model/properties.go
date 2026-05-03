@@ -53,4 +53,15 @@ const (
 	PropertyBasediffMatchedBasePath = "astinus:basediff:matched-base-path"
 	PropertyBasediffState           = "astinus:basediff:state"
 	PropertyBasediffConfidence      = "astinus:basediff:confidence"
+
+	// Compliance findings (PRSD Task 7). Stamped on Metadata.Properties
+	// after every validator runs. Per-validator status carries the
+	// pass/warn/fail summary; aggregate counts surface at SBOM level.
+	// Per-component findings are stamped on the matched Component as
+	// `astinus:compliance:finding:<rule-id>=<severity>`.
+	PropertyComplianceFindingsCount = "astinus:compliance:findings-count"
+	PropertyComplianceCriticalCount = "astinus:compliance:critical-count"
+	PropertyComplianceHighCount     = "astinus:compliance:high-count"
+	PropertyComplianceMediumCount   = "astinus:compliance:medium-count"
+	PropertyComplianceLowCount      = "astinus:compliance:low-count"
 )

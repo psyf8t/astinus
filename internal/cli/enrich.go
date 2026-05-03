@@ -17,6 +17,7 @@ import (
 	"github.com/psyf8t/astinus/internal/enrich"
 	"github.com/psyf8t/astinus/internal/enrich/attribution"
 	"github.com/psyf8t/astinus/internal/enrich/basediff"
+	"github.com/psyf8t/astinus/internal/enrich/compliance"
 	"github.com/psyf8t/astinus/internal/enrich/cpe"
 	cpesources "github.com/psyf8t/astinus/internal/enrich/cpe/sources"
 	"github.com/psyf8t/astinus/internal/enrich/dedup"
@@ -28,6 +29,7 @@ import (
 	"github.com/psyf8t/astinus/internal/image/source"
 	"github.com/psyf8t/astinus/internal/image/transport"
 	"github.com/psyf8t/astinus/internal/output"
+	"github.com/psyf8t/astinus/internal/policy"
 	sbompkg "github.com/psyf8t/astinus/internal/sbom"
 	"github.com/psyf8t/astinus/internal/sbom/cyclonedx"
 	"github.com/psyf8t/astinus/internal/sbom/model"
@@ -44,6 +46,10 @@ const (
 	// would require an outbound network call (e.g. registry pull).
 	// Spec section 6.4.
 	ExitNoNetwork = 30
+	// ExitComplianceFail is emitted when --fail-on names a severity
+	// floor and at least one compliance finding meets that floor.
+	// PRSD-Task-7.
+	ExitComplianceFail = 40
 )
 
 // enrichOptions are bound to flags by newEnrichCommand.
@@ -85,6 +91,11 @@ type enrichOptions struct {
 	// nvdAPIKey is the NVD API key (env: NVD_API_KEY).
 	// PRSD-Task-5.
 	nvdAPIKey string
+	// failOn is the compliance-finding severity gate. Empty
+	// means "never fail on compliance findings"; non-empty
+	// values are one of `critical`, `high`, `medium`, `low`,
+	// `info`. PRSD-Task-7.
+	failOn string
 }
 
 func newEnrichCommand() *cobra.Command {
@@ -142,6 +153,8 @@ add the others.`,
 		"CPE resolver mode: online | offline | hybrid (default hybrid)")
 	flags.StringVar(&opts.nvdAPIKey, "nvd-api-key", "",
 		"NVD API key (env: NVD_API_KEY). Higher rate limit (50 req / 30s vs 5 req / 30s)")
+	flags.StringVar(&opts.failOn, "fail-on", "",
+		"Exit non-zero when any compliance finding meets this severity: critical | high | medium | low | info (default: never fail)")
 
 	_ = cmd.MarkFlagRequired("sbom")
 	_ = cmd.MarkFlagRequired("image")
@@ -245,7 +258,50 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 		"output", opts.outputPath,
 		"format", formatName,
 	)
+
+	// ── Step 5: --fail-on compliance gate ─────────────────────────
+	// Evaluated AFTER the SBOM is rendered so operators always
+	// keep the artefact even when the gate trips. The gate's
+	// non-zero exit signals "produced but failed compliance".
+	// PRSD-Task-7.
+	if exitErr := evaluateComplianceGate(ctx, opts, sbom, logger); exitErr != nil {
+		return exitErr
+	}
 	return nil
+}
+
+// evaluateComplianceGate enforces `--fail-on <severity>`. Returns
+// nil when the flag was empty or no finding crossed the threshold;
+// otherwise returns a non-zero ExitComplianceFail error.
+func evaluateComplianceGate(ctx context.Context, opts *enrichOptions, sbom *model.SBOM, logger *slog.Logger) error {
+	if opts.failOn == "" {
+		return nil
+	}
+	floor, ok := policy.ParseSeverity(strings.ToLower(strings.TrimSpace(opts.failOn)))
+	if !ok {
+		return newExitError(ExitInvalidArgs, fmt.Errorf("--fail-on: unknown severity %q", opts.failOn))
+	}
+	enricher := compliance.New()
+	findings := enricher.Findings(ctx, sbom)
+	hits := 0
+	for _, f := range findings {
+		if f.Severity.AtLeast(floor) {
+			hits++
+		}
+	}
+	if hits == 0 {
+		logger.Info("compliance.gate.passed",
+			"floor", floor.String(),
+			"findings_total", len(findings))
+		return nil
+	}
+	logger.Warn("compliance.gate.failed",
+		"floor", floor.String(),
+		"findings_at_or_above_floor", hits,
+		"findings_total", len(findings))
+	return newExitError(ExitComplianceFail,
+		fmt.Errorf("compliance: %d finding(s) at or above %q severity (run with --fail-on=\"\" to disable the gate)",
+			hits, floor.String()))
 }
 
 // loadSBOM reads from stdin (path == "-") or a file, auto-detects the
@@ -456,6 +512,11 @@ func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.
 		// added by upstream enrichers participate in the dedup key.
 		// post-Stage-13 hardening Task 2.
 		dedup.New(),
+		// compliance runs AFTER dedup (PRSD-Task-6 deps =
+		// ["dedup"]) so validators see the post-dedup SBOM with
+		// every PURL / CPE / Origin already stamped.
+		// PRSD-Task-7.
+		compliance.New(),
 	}, nil
 }
 
