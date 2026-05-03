@@ -323,6 +323,67 @@ func TestEnrichRecognisesJAR(t *testing.T) {
 	}
 }
 
+// TestEnrichExtractorAppliesJavaIdentity — PRSD-Task-4: a JAR
+// with both pom.properties and MANIFEST.MF prefers the
+// pom.properties tier and stamps `astinus:extractor:source=java`
+// plus `java.tier=pom-properties`.
+func TestEnrichExtractorAppliesJavaIdentity(t *testing.T) {
+	jar := buildJARFiles(t, map[string]string{
+		"META-INF/maven/org.apache.commons/commons-lang3/pom.properties": "" +
+			"version=3.14.0\n" +
+			"groupId=org.apache.commons\n" +
+			"artifactId=commons-lang3\n",
+		"META-INF/MANIFEST.MF": "Manifest-Version: 1.0\r\n\r\n",
+	})
+	img := buildImage(t, map[string][]byte{"opt/app/commons-lang3-3.14.0.jar": jar})
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+	if err := New().Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if len(sbom.Components) != 1 {
+		t.Fatalf("components = %d, want 1", len(sbom.Components))
+	}
+	c := sbom.Components[0]
+	if c.Name != "commons-lang3" || c.Version != "3.14.0" {
+		t.Errorf("identity = %+v", c)
+	}
+	if c.PURL != "pkg:maven/org.apache.commons/commons-lang3@3.14.0" {
+		t.Errorf("PURL = %q", c.PURL)
+	}
+	if c.Properties["astinus:extractor:source"] != "java" {
+		t.Errorf("extractor source = %q", c.Properties["astinus:extractor:source"])
+	}
+	if c.Properties["java.tier"] != "pom-properties" {
+		t.Errorf("java.tier = %q", c.Properties["java.tier"])
+	}
+	if c.Type != model.ComponentTypeLibrary {
+		t.Errorf("Type = %v, want library", c.Type)
+	}
+}
+
+// buildJARFiles is a multi-entry analogue of buildJAR — assembles a
+// zip from a name → body map. Used by the extractor integration
+// test to fake pom.properties + manifest in one fixture.
+func buildJARFiles(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, body := range files {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
 // countingMatcher records every Lookup call so tests can assert
 // MatcherSkipUnknown / MatcherMinFileBytes really skip work.
 type countingMatcher struct {

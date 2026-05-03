@@ -43,6 +43,7 @@ import (
 	"github.com/psyf8t/astinus/internal/enrich/untracked/cluster"
 	"github.com/psyf8t/astinus/internal/enrich/untracked/pathclassifier"
 	"github.com/psyf8t/astinus/internal/fingerprint"
+	"github.com/psyf8t/astinus/internal/fingerprint/extractor"
 	"github.com/psyf8t/astinus/internal/fingerprint/matcher"
 	"github.com/psyf8t/astinus/internal/image"
 	"github.com/psyf8t/astinus/internal/image/layer"
@@ -132,6 +133,13 @@ type Options struct {
 	// uses the detector's defaults (256 KiB anchor cap, density
 	// stage on, MinDirChildren=3). PRSD-Task-3.
 	ClusterOptions cluster.Options
+
+	// Extractors is the multi-modal binary extractor registry
+	// (PRSD-Task-4). Nil → the bundled default registry from
+	// `extractor.NewDefault()` (Go / Rust / Java / Python / PE /
+	// ELF). Pass `extractor.New()` (zero extractors) to disable
+	// extraction entirely.
+	Extractors *extractor.Registry
 }
 
 // Enricher implements enrich.Enricher.
@@ -173,6 +181,9 @@ func NewWithOptions(o Options) *Enricher {
 				o.PathClassifier = c
 			}
 		}
+	}
+	if o.Extractors == nil {
+		o.Extractors = extractor.NewDefault()
 	}
 	return &Enricher{opts: o}
 }
@@ -451,7 +462,7 @@ func (e *Enricher) runMatcherWorkers(ctx context.Context, sbom *model.SBOM, task
 // visit runs the per-file pipeline (pre-pass filters → processFile →
 // append + queue matcher task). Extracted from Enrich so the closure
 // stays simple and the linter is happy with cognitive complexity.
-func (e *Enricher) visit(_ context.Context, sbom *model.SBOM, idx *knownIndex, clusters []cluster.Cluster, stats *scanStats, tasks *[]matchTask, fe layer.FileEntry, body io.Reader) error {
+func (e *Enricher) visit(ctx context.Context, sbom *model.SBOM, idx *knownIndex, clusters []cluster.Cluster, stats *scanStats, tasks *[]matchTask, fe layer.FileEntry, body io.Reader) error {
 	if e.opts.MaxComponents > 0 && stats.added >= e.opts.MaxComponents {
 		return errLimitHit
 	}
@@ -471,7 +482,7 @@ func (e *Enricher) visit(_ context.Context, sbom *model.SBOM, idx *knownIndex, c
 		return nil
 	}
 
-	r, err := e.processFile(fe, body)
+	r, err := e.processFile(ctx, fe, body)
 	if err != nil {
 		return err
 	}
@@ -639,7 +650,7 @@ func logScanStats(s scanStats, matcherHits int) {
 // matcher task. ok=false for noise / config / static-archive
 // (skipped); err is for true I/O errors. Matcher.Lookup is no longer
 // called here — see runMatcherWorkers.
-func (e *Enricher) processFile(fe layer.FileEntry, body io.Reader) (processResult, error) {
+func (e *Enricher) processFile(ctx context.Context, fe layer.FileEntry, body io.Reader) (processResult, error) {
 	buf, err := readCapped(body, e.opts.MaxFileBytes)
 	if err != nil {
 		return processResult{}, err
@@ -666,7 +677,7 @@ func (e *Enricher) processFile(fe layer.FileEntry, body io.Reader) (processResul
 	sha := hashes[0].Value
 
 	comp := buildBaseComponent(fe, cls, sha, hashes)
-	enrichEmbedded(&comp, cls.Category, buf)
+	e.enrichEmbedded(ctx, &comp, cls.Category, extractor.File{Path: fe.Path, Body: buf})
 	return processResult{
 		comp:     comp,
 		sha256:   sha,
@@ -703,21 +714,79 @@ func (e *Enricher) shouldMatcherLookup(cat Category, size int64) bool {
 	}
 }
 
-// enrichEmbedded looks for in-file metadata (Go buildinfo, JAR
-// MANIFEST) and folds it onto comp.
-func enrichEmbedded(comp *model.Component, cat Category, body []byte) {
+// enrichEmbedded folds extractor-recovered identity onto comp.
+//
+// Routes through the multi-modal extractor registry (PRSD-Task-4):
+// the registry tries every matching extractor (Go buildinfo, Rust
+// auditable, Java JAR metadata, Python METADATA, PE filename, ELF
+// SONAME) and returns the highest-confidence Identity. Categories
+// the registry can't help with (Noise / Config / Script / etc.)
+// are short-circuited.
+func (e *Enricher) enrichEmbedded(ctx context.Context, comp *model.Component, cat Category, file extractor.File) {
 	switch cat {
-	case CategoryExecutable:
-		if gobi, err := fingerprint.ReadGoBuildInfo(bytes.NewReader(body)); err == nil {
-			attachGoBuildInfo(comp, gobi)
-		}
-	case CategoryArchive:
-		if md, err := fingerprint.ReadJARMetadata(body); err == nil && md != nil {
-			attachJARMetadata(comp, md)
-		}
+	case CategoryExecutable, CategoryArchive, CategoryLibrary:
+		// fall through — these are the categories the registry
+		// usefully fingerprints.
 	case CategoryNoise, CategoryStaticArchive, CategoryScript,
-		CategoryLibrary, CategoryConfig, CategoryUnknown, CategoryRedundant:
-		// no embedded-metadata extraction for these categories
+		CategoryConfig, CategoryUnknown, CategoryRedundant:
+		return
+	}
+	if e.opts.Extractors == nil {
+		return
+	}
+	id, ok := e.opts.Extractors.First(ctx, file)
+	if !ok {
+		return
+	}
+	applyExtractorIdentity(comp, id)
+}
+
+// applyExtractorIdentity copies an Identity onto comp. Existing
+// Component fields (PURL, Vendor) are overwritten ONLY when the
+// extractor produced a non-empty value — Syft-supplied data on the
+// component is preserved when the extractor returns nothing for that
+// field.
+func applyExtractorIdentity(c *model.Component, id extractor.Identity) {
+	if id.Name != "" {
+		c.Name = id.Name
+	}
+	if id.Version != "" {
+		c.Version = id.Version
+	}
+	if id.PURL != "" {
+		c.PURL = id.PURL
+	}
+	if id.Vendor != "" {
+		c.Supplier = id.Vendor
+	}
+	if c.Properties == nil {
+		c.Properties = map[string]string{}
+	}
+	c.Properties["astinus:extractor:source"] = id.Source
+	if id.Source == "java" {
+		// Library type for JARs (the base classifier picks
+		// `file` for Archive — extracting a JAR upgrades it).
+		c.Type = model.ComponentTypeLibrary
+	}
+	for k, v := range id.Properties {
+		if v == "" {
+			continue
+		}
+		c.Properties[k] = v
+	}
+	for _, sub := range id.SubComponents {
+		c.SubComponents = append(c.SubComponents, identityToSubComponent(sub))
+	}
+}
+
+// identityToSubComponent renders a SubComponent for nested
+// dependencies (Go module deps, Rust crate deps).
+func identityToSubComponent(id extractor.Identity) model.Component {
+	return model.Component{
+		Type:    model.ComponentTypeLibrary,
+		Name:    id.Name,
+		Version: id.Version,
+		PURL:    id.PURL,
 	}
 }
 
@@ -793,45 +862,6 @@ func categoryString(c Category) string {
 	}
 }
 
-// attachGoBuildInfo adds Go module info as SubComponents and wires
-// the parent component's PURL when the main module is identifiable.
-func attachGoBuildInfo(c *model.Component, bi *fingerprint.GoBuildInfo) {
-	c.Properties["astinus:untracked:go-version"] = bi.GoVersion
-	if bi.Main.Path != "" && bi.Main.Path != "command-line-arguments" {
-		c.PURL = "pkg:golang/" + bi.Main.Path + "@" + nonEmpty(bi.Main.Version, "(devel)")
-	}
-	for _, dep := range bi.Deps {
-		if dep.Path == "" {
-			continue
-		}
-		c.SubComponents = append(c.SubComponents, model.Component{
-			Type:    model.ComponentTypeLibrary,
-			Name:    dep.Path,
-			Version: dep.Version,
-			PURL:    "pkg:golang/" + dep.Path + "@" + nonEmpty(dep.Version, ""),
-		})
-	}
-}
-
-// attachJARMetadata fills in name / version / vendor from the JAR
-// manifest when those keys were populated.
-func attachJARMetadata(c *model.Component, md *fingerprint.JARMetadata) {
-	if md.BundleSymbolicName != "" {
-		c.Name = md.BundleSymbolicName
-	} else if md.ImplementationTitle != "" {
-		c.Name = md.ImplementationTitle
-	}
-	if md.BundleVersion != "" {
-		c.Version = md.BundleVersion
-	} else if md.ImplementationVersion != "" {
-		c.Version = md.ImplementationVersion
-	}
-	if md.ImplementationVendor != "" {
-		c.Supplier = md.ImplementationVendor
-	}
-	c.Type = model.ComponentTypeLibrary
-}
-
 func applyMatch(c *model.Component, m matcher.Match) {
 	if m.Name != "" {
 		c.Name = m.Name
@@ -851,13 +881,6 @@ func applyMatch(c *model.Component, m matcher.Match) {
 	if m.Source != "" {
 		c.Properties["astinus:untracked:matcher"] = m.Source
 	}
-}
-
-func nonEmpty(s, fallback string) string {
-	if s == "" {
-		return fallback
-	}
-	return s
 }
 
 // readCapped reads up to limit+1 bytes; if the input is longer it
