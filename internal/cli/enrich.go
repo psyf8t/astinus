@@ -226,7 +226,10 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 	logger.Info("image.opened", "ref", bundle.Reference.String())
 
 	// ── Step 3: build & run the pipeline ───────────────────────────
-	enrichers, err := allEnrichers(ctx, opts, sourceOpts, tr)
+	// Pass len(sbom.Components) so the CPE enricher can skip the
+	// NVD API source up-front when the workload would wedge under
+	// the anonymous rate limit. ADR-0028.
+	enrichers, err := allEnrichers(ctx, opts, sourceOpts, tr, len(sbom.Components))
 	if err != nil {
 		// --offline-db / matcher-chain build failures must not be
 		// silently dropped — air-gapped CI must fail loudly when
@@ -508,7 +511,7 @@ func authProviderForRegistry(r cfgpkg.RegistryConfig) auth.CredentialProvider {
 // CPE-chain loader cannot read; air-gapped CI must surface that
 // rather than silently fall back to default chains. post-stage-13
 // review F-011.
-func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.Option, tr http.RoundTripper) ([]enrich.Enricher, error) {
+func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.Option, tr http.RoundTripper, componentCount int) ([]enrich.Enricher, error) {
 	logger := LoggerFrom(ctx)
 
 	matcherChain, err := buildFingerprintMatcher(ctx, opts, tr)
@@ -529,7 +532,7 @@ func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.
 		DisableClustering: opts.noCluster,
 	})
 
-	cpeEnricher, err := buildCPEEnricher(opts, tr, logger)
+	cpeEnricher, err := buildCPEEnricher(opts, tr, logger, componentCount)
 	if err != nil {
 		return nil, err
 	}
@@ -675,7 +678,7 @@ func refRequiresNetwork(ref string) bool {
 //   - `--no-network` overrides --cpe-mode and forces offline mode.
 //
 // PRSD-Task-5.
-func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Logger) (*cpe.Enricher, error) {
+func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Logger, componentCount int) (*cpe.Enricher, error) {
 	mode := cpesources.Mode(strings.ToLower(strings.TrimSpace(opts.cpeMode)))
 	if !mode.IsKnown() {
 		mode = cpesources.ModeHybrid
@@ -697,16 +700,31 @@ func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Lo
 			srcs = append(srcs, s)
 		}
 	}
+	nvdSkipped := false
 	if mode != cpesources.ModeOffline {
 		client := &http.Client{Transport: tr, Timeout: 30 * time.Second}
 		nvdKey := opts.nvdAPIKey
 		if nvdKey == "" {
 			nvdKey = os.Getenv("NVD_API_KEY")
 		}
-		srcs = append(srcs,
-			cpesources.NewNVDAPI(nvdKey, client),
-			cpesources.NewClearlyDefined(client),
-		)
+		// PRSD post-Task-9 hardening: at large workloads, the
+		// anonymous NVD endpoint (5 req/30 s) wedges the cpe phase
+		// for hours. Skip the source up-front when the operator is
+		// in hybrid mode without an API key. ADR-0028.
+		if shouldSkipAnonymousNVDInHybrid(mode, nvdKey, componentCount) {
+			nvdSkipped = true
+			logger.Warn(telemetry.EventCPENVDSkipped,
+				"reason", "hybrid + no NVD_API_KEY + workload above safe threshold",
+				"components", componentCount,
+				"threshold", nvdHybridSkipThreshold,
+				"anonymous_rate", "5 req/30s",
+				"estimated_minutes_at_anonymous_rate", estimateAnonymousNVDMinutes(componentCount),
+				"advice", nvdSkipAdvice(componentCount),
+			)
+		} else {
+			srcs = append(srcs, cpesources.NewNVDAPI(nvdKey, client))
+		}
+		srcs = append(srcs, cpesources.NewClearlyDefined(client))
 	}
 	srcs = append(srcs, cpesources.NewHeuristic())
 
@@ -718,7 +736,8 @@ func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Lo
 	logger.Info("cpe.resolver.configured",
 		"mode", string(mode),
 		"sources", len(resolver.Sources()),
-		"nvd_authenticated", opts.nvdAPIKey != "" || os.Getenv("NVD_API_KEY") != "")
+		"nvd_authenticated", opts.nvdAPIKey != "" || os.Getenv("NVD_API_KEY") != "",
+		"nvd_skipped", nvdSkipped)
 	return cpe.NewWithResolver(resolver), nil
 }
 

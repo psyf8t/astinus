@@ -69,6 +69,7 @@ const (
 	EventCPESourceError    = "cpe.source.error"
 	EventCPELocalLoaded    = "cpe.local.loaded"
 	EventCPELocalSkip      = "cpe.local.skip"
+	EventCPENVDSkipped     = "cpe.nvd.skipped"
 	EventDedupComplete     = "dedup.complete"
 
 	// ─── Compliance events (PRSD-Task-7) ────────────────────────────
@@ -101,7 +102,7 @@ var AllEvents = []string{
 	EventBasediffDiff, EventBasediffContent, EventBasediffFallback, EventBasediffPartial,
 	EventClusterDetected, EventClusterFailed, EventUntrackedStats, EventUntrackedRules,
 	EventCPEResolverConfig, EventCPEComplete, EventCPESourceError,
-	EventCPELocalLoaded, EventCPELocalSkip, EventDedupComplete,
+	EventCPELocalLoaded, EventCPELocalSkip, EventCPENVDSkipped, EventDedupComplete,
 	EventComplianceComplete, EventComplianceValidatorError,
 	EventComplianceGatePassed, EventComplianceGateFailed,
 	EventMetricsExported, EventTracingDisabled, EventTracingInit,
