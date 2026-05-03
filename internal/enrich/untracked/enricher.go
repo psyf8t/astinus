@@ -38,6 +38,9 @@ import (
 	"sync"
 	"time"
 
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+
+	"github.com/psyf8t/astinus/internal/enrich/untracked/cluster"
 	"github.com/psyf8t/astinus/internal/enrich/untracked/pathclassifier"
 	"github.com/psyf8t/astinus/internal/fingerprint"
 	"github.com/psyf8t/astinus/internal/fingerprint/matcher"
@@ -117,6 +120,18 @@ type Options struct {
 	// Pass an explicitly-constructed *pathclassifier.Classifier to
 	// merge a `--rules-file` override on top. PRSD-Task-1.
 	PathClassifier *pathclassifier.Classifier
+
+	// DisableClustering turns off the filesystem-aware clustering
+	// pre-pass (PRSD-Task-2). Default false → clustering runs.
+	// Operators set this when they want every file recorded as a
+	// separate Component (debug, or a downstream tool that already
+	// does its own grouping). PRSD-Task-3.
+	DisableClustering bool
+
+	// ClusterOptions tunes the clustering detector. Zero value
+	// uses the detector's defaults (256 KiB anchor cap, density
+	// stage on, MinDirChildren=3). PRSD-Task-3.
+	ClusterOptions cluster.Options
 }
 
 // Enricher implements enrich.Enricher.
@@ -171,6 +186,7 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 		return fmt.Errorf("untracked: missing sbom/bundle/image")
 	}
 
+	clusters := e.runClusterPrePass(ctx, sbom, bundle.Image)
 	idx := buildKnownIndex(sbom)
 	stats := newScanStats()
 
@@ -181,7 +197,7 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 	var tasks []matchTask
 
 	visitor := func(ctx context.Context, fe layer.FileEntry, body io.Reader) error {
-		return e.visit(ctx, sbom, idx, &stats, &tasks, fe, body)
+		return e.visit(ctx, sbom, idx, clusters, &stats, &tasks, fe, body)
 	}
 
 	err := layer.WalkFiles(ctx, bundle.Image, visitor)
@@ -193,6 +209,191 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 	matcherHits := e.runMatcherWorkers(ctx, sbom, tasks)
 	logScanStats(stats, matcherHits)
 	return nil
+}
+
+// runClusterPrePass runs the filesystem-aware clustering detector
+// (PRSD-Task-3) against the image, then emits one Component per
+// detected cluster (skipping clusters whose identity already exists
+// in the SBOM — Syft typically discovers npm / pypi / maven
+// packages, so we don't want to duplicate them).
+//
+// Returns the cluster slice the visitor uses to skip files inside
+// cluster roots. When clustering is disabled (DisableClustering=true)
+// or the detector errors out, returns nil — the visitor degrades to
+// pre-clustering behaviour.
+func (e *Enricher) runClusterPrePass(ctx context.Context, sbom *model.SBOM, img v1.Image) []cluster.Cluster {
+	if e.opts.DisableClustering {
+		return nil
+	}
+	clusters, err := cluster.DetectClusters(ctx, img, e.opts.ClusterOptions)
+	if err != nil {
+		// Detection failure must not abort the enricher — the
+		// per-file walk still produces useful output.
+		slog.Default().Warn("untracked.cluster.detect-failed", "err", err.Error())
+		return nil
+	}
+	// Dedup index keyed by both the full PURL (qualifier-stripped)
+	// and the type-coordinates triple (`<type>/<namespace>/<name>`,
+	// version-stripped) so a cluster whose anchor lacked a version
+	// (e.g. package.json with no `version` field) still matches an
+	// existing Syft component that does carry one.
+	knownPURLs := make(map[string]struct{}, len(sbom.Components))
+	knownCoords := make(map[string]struct{}, len(sbom.Components))
+	walkComponents(sbom.Components, func(c *model.Component) {
+		if c.PURL != "" {
+			knownPURLs[normalisePURL(c.PURL)] = struct{}{}
+			if coord := purlCoordinates(c.PURL); coord != "" {
+				knownCoords[coord] = struct{}{}
+			}
+		}
+	})
+	added := 0
+	for i := range clusters {
+		c := &clusters[i]
+		if c.Identity.Name == "" {
+			continue
+		}
+		key := normalisePURL(c.Identity.PURL)
+		if _, dup := knownPURLs[key]; dup {
+			continue
+		}
+		if coord := purlCoordinates(c.Identity.PURL); coord != "" {
+			if _, dup := knownCoords[coord]; dup {
+				continue
+			}
+		}
+		sbom.Components = append(sbom.Components, clusterToComponent(c))
+		added++
+		knownPURLs[key] = struct{}{}
+	}
+	slog.Default().Info("untracked.cluster.detected",
+		"clusters_total", len(clusters),
+		"clusters_added", added,
+		"clusters_skipped_duplicate", len(clusters)-added,
+	)
+	return clusters
+}
+
+// walkComponents is the depth-first visitor used to dedup against
+// pre-existing Syft components. Mirrored in basediff for the same
+// SBOM-shape recursion.
+func walkComponents(comps []model.Component, fn func(*model.Component)) {
+	for i := range comps {
+		fn(&comps[i])
+		if len(comps[i].SubComponents) > 0 {
+			walkComponents(comps[i].SubComponents, fn)
+		}
+	}
+}
+
+// normalisePURL strips Astinus-emitted ?root= qualifiers and Syft's
+// `?package-id=` so dedup compares the same package across sources.
+func normalisePURL(purl string) string {
+	if i := strings.IndexByte(purl, '?'); i >= 0 {
+		return purl[:i]
+	}
+	return purl
+}
+
+// purlCoordinates returns the version-stripped `<type>/<namespace>/<name>`
+// triple (e.g. `pkg:npm/lodash@4.17.21?id=x` → `npm/lodash`,
+// `pkg:maven/com.example/app@1.0` → `maven/com.example/app`). Used
+// for dedup when one side lacks a version.
+//
+// Returns "" when the input is not a parseable PURL.
+func purlCoordinates(purl string) string {
+	const prefix = "pkg:"
+	if !strings.HasPrefix(purl, prefix) {
+		return ""
+	}
+	body := purl[len(prefix):]
+	if i := strings.IndexByte(body, '?'); i >= 0 {
+		body = body[:i]
+	}
+	if i := strings.IndexByte(body, '@'); i >= 0 {
+		body = body[:i]
+	}
+	return body
+}
+
+// clusterToComponent assembles a model.Component for a detected
+// cluster: identity → core fields, file list → SubComponents NOT
+// (clustered files are described by properties, not exploded as
+// individual components).
+func clusterToComponent(c *cluster.Cluster) model.Component {
+	bomRef := "cluster-" + safeBOMRef(c.Identity.Type+"-"+c.Identity.Name+"-"+c.Identity.Version)
+	comp := model.Component{
+		BOMRef:  bomRef,
+		Type:    componentTypeForCluster(c.Identity.Type),
+		Name:    c.Identity.Name,
+		Version: c.Identity.Version,
+		PURL:    c.Identity.PURL,
+		Evidence: &model.Evidence{
+			Method: "cluster",
+			Locations: []model.EvidenceLocation{
+				{Path: c.Root},
+			},
+		},
+		Properties: map[string]string{
+			"astinus:cluster:type":             c.Identity.Type,
+			"astinus:cluster:detection-method": c.Identity.DetectionMethod,
+			"astinus:cluster:confidence":       fmt.Sprintf("%.2f", c.Identity.Confidence),
+			"astinus:cluster:file-count":       fmt.Sprintf("%d", len(c.Files)),
+			"astinus:cluster:total-size-bytes": fmt.Sprintf("%d", c.TotalSize),
+			"astinus:cluster:root":             c.Root,
+		},
+	}
+	if c.Identity.AnchorPath != "" {
+		comp.Properties["astinus:cluster:anchor-path"] = c.Identity.AnchorPath
+	}
+	return comp
+}
+
+// componentTypeForCluster maps a cluster type string to the closest
+// CycloneDX componentType. Helm charts are "application"; everything
+// else is "library" (consistent with how Syft reports the same
+// ecosystems).
+func componentTypeForCluster(typ string) model.ComponentType {
+	switch typ {
+	case "helm":
+		return model.ComponentTypeApplication
+	default:
+		return model.ComponentTypeLibrary
+	}
+}
+
+// safeBOMRef strips characters that would be ugly in a BOMRef. We
+// keep ASCII letters, digits, dashes and dots; everything else
+// becomes a dash.
+func safeBOMRef(s string) string {
+	if s == "" {
+		return "anon"
+	}
+	var sb strings.Builder
+	sb.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= 'A' && c <= 'Z',
+			c >= '0' && c <= '9',
+			c == '-', c == '.':
+			sb.WriteByte(c)
+		default:
+			sb.WriteByte('-')
+		}
+	}
+	return sb.String()
+}
+
+// withinAnyCluster reports whether p sits under any cluster root.
+func withinAnyCluster(p string, clusters []cluster.Cluster) (string, bool) {
+	for i := range clusters {
+		if clusters[i].Within(p) {
+			return clusters[i].Identity.Name, true
+		}
+	}
+	return "", false
 }
 
 // matchTask is one queued matcher.Lookup deferred until after the
@@ -250,11 +451,20 @@ func (e *Enricher) runMatcherWorkers(ctx context.Context, sbom *model.SBOM, task
 // visit runs the per-file pipeline (pre-pass filters → processFile →
 // append + queue matcher task). Extracted from Enrich so the closure
 // stays simple and the linter is happy with cognitive complexity.
-func (e *Enricher) visit(_ context.Context, sbom *model.SBOM, idx *knownIndex, stats *scanStats, tasks *[]matchTask, fe layer.FileEntry, body io.Reader) error {
+func (e *Enricher) visit(_ context.Context, sbom *model.SBOM, idx *knownIndex, clusters []cluster.Cluster, stats *scanStats, tasks *[]matchTask, fe layer.FileEntry, body io.Reader) error {
 	if e.opts.MaxComponents > 0 && stats.added >= e.opts.MaxComponents {
 		return errLimitHit
 	}
 	stats.scanned++
+
+	if name, ok := withinAnyCluster(fe.Path, clusters); ok {
+		// File belongs to a cluster — already represented as a
+		// single Component upstream. Drop the per-file row so the
+		// SBOM stays compact.
+		stats.skippedByCluster++
+		stats.byCluster[name]++
+		return nil
+	}
 
 	preReason, skip := e.preFilter(fe.Path, idx, stats)
 	if skip {
@@ -375,7 +585,8 @@ func (e *Enricher) applyPathClassifier(filePath string, stats *scanStats) (strin
 
 // scanStats is the per-Enrich-call set of counters that drive the
 // `untracked.stats` log line. post-Stage-13 hardening Task 1 + Task 4
-// + PRSD-Task-1 (declarative-rules counters).
+// + PRSD-Task-1 (declarative-rules counters) + PRSD-Task-3 (cluster
+// counters).
 type scanStats struct {
 	start             time.Time
 	scanned           int
@@ -384,8 +595,10 @@ type scanStats struct {
 	noise             int
 	skippedClassifier int
 	skippedByRule     int // PRSD-Task-1: pathclassifier hits
+	skippedByCluster  int // PRSD-Task-3: file inside a cluster root
 	byCategory        map[string]int
 	byRule            map[string]int // PRSD-Task-1: per-rule hit count
+	byCluster         map[string]int // PRSD-Task-3: per-cluster file count
 }
 
 func newScanStats() scanStats {
@@ -393,6 +606,7 @@ func newScanStats() scanStats {
 		start:      time.Now(),
 		byCategory: map[string]int{},
 		byRule:     map[string]int{},
+		byCluster:  map[string]int{},
 	}
 }
 
@@ -409,8 +623,10 @@ func logScanStats(s scanStats, matcherHits int) {
 		"files_skipped_noise", s.noise,
 		"files_skipped_classifier", s.skippedClassifier,
 		"files_skipped_by_rule", s.skippedByRule,
+		"files_skipped_by_cluster", s.skippedByCluster,
 		"by_category", s.byCategory,
 		"by_rule", s.byRule,
+		"by_cluster", s.byCluster,
 		"matcher_hits", matcherHits,
 		"duration_ms", dur.Milliseconds(),
 		"throughput_files_per_sec", int(throughput),

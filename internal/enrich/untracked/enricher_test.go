@@ -211,6 +211,97 @@ rules:
 	}
 }
 
+// TestEnrichClusteringEmitsSingleComponent — PRSD-Task-3: an
+// extracted npm package produces ONE cluster Component instead of
+// per-file rows for each of its files.
+func TestEnrichClusteringEmitsSingleComponent(t *testing.T) {
+	img := buildImage(t, map[string][]byte{
+		"app/node_modules/lodash/package.json":    []byte(`{"name":"lodash","version":"4.17.21"}`),
+		"app/node_modules/lodash/index.js":        []byte("module.exports = {};"),
+		"app/node_modules/lodash/lib/foo.js":      []byte("// foo"),
+		"app/node_modules/lodash/lib/bar.js":      []byte("// bar"),
+		"app/node_modules/lodash/lib/internal.so": {0x7f, 'E', 'L', 'F', 0, 0, 0, 0, 1, 2, 3},
+	})
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+	if err := New().Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if len(sbom.Components) != 1 {
+		names := make([]string, 0, len(sbom.Components))
+		for _, c := range sbom.Components {
+			names = append(names, c.Name)
+		}
+		t.Fatalf("components = %v, want exactly 1 (lodash cluster)", names)
+	}
+	c := sbom.Components[0]
+	if c.Name != "lodash" {
+		t.Errorf("Name = %q, want lodash", c.Name)
+	}
+	if c.PURL != "pkg:npm/lodash@4.17.21" {
+		t.Errorf("PURL = %q", c.PURL)
+	}
+	if c.Properties["astinus:cluster:type"] != "npm" {
+		t.Errorf("cluster:type = %q", c.Properties["astinus:cluster:type"])
+	}
+	if c.Properties["astinus:cluster:detection-method"] != "anchor:package.json" {
+		t.Errorf("cluster:detection-method = %q",
+			c.Properties["astinus:cluster:detection-method"])
+	}
+	if c.Properties["astinus:cluster:file-count"] == "0" ||
+		c.Properties["astinus:cluster:file-count"] == "" {
+		t.Errorf("cluster:file-count = %q, want > 0",
+			c.Properties["astinus:cluster:file-count"])
+	}
+}
+
+// TestEnrichClusteringDedupAgainstExistingSyftEntry — Syft already
+// reported lodash in the input SBOM; the cluster pre-pass must NOT
+// duplicate it.
+func TestEnrichClusteringDedupAgainstExistingSyftEntry(t *testing.T) {
+	img := buildImage(t, map[string][]byte{
+		"app/node_modules/lodash/package.json": []byte(`{"name":"lodash","version":"4.17.21"}`),
+		"app/node_modules/lodash/index.js":     []byte("module.exports = {};"),
+	})
+	sbom := &model.SBOM{Components: []model.Component{{
+		Name:    "lodash",
+		Version: "4.17.21",
+		PURL:    "pkg:npm/lodash@4.17.21",
+		Properties: map[string]string{
+			"syft:location:0:path": "/app/node_modules/lodash/package.json",
+		},
+	}}}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+	if err := New().Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if len(sbom.Components) != 1 {
+		t.Errorf("components = %d, want 1 (no duplicate)", len(sbom.Components))
+	}
+}
+
+// TestEnrichClusteringDisabledViaOptions — DisableClustering=true
+// preserves the pre-PRSD-Task-3 behaviour: every visible file
+// surfaces (subject to the existing redundancy filter, which still
+// drops them because of Syft's known-paths index).
+func TestEnrichClusteringDisabledViaOptions(t *testing.T) {
+	img := buildImage(t, map[string][]byte{
+		"app/node_modules/lodash/package.json": []byte(`{"name":"lodash","version":"4.17.21"}`),
+		"app/node_modules/lodash/main.go":      {0x7f, 'E', 'L', 'F', 0, 0, 0, 0, 1, 2, 3},
+	})
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+	e := NewWithOptions(Options{DisableClustering: true})
+	if err := e.Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	for _, c := range sbom.Components {
+		if c.Properties["astinus:cluster:type"] != "" {
+			t.Errorf("cluster Component leaked when DisableClustering=true: %s", c.Name)
+		}
+	}
+}
+
 func TestEnrichRecognisesJAR(t *testing.T) {
 	jar := buildJAR(t, "Bundle-SymbolicName: com.example.jar\r\nBundle-Version: 2.0.0\r\n\r\n")
 	img := buildImage(t, map[string][]byte{"opt/app/lib.jar": jar})

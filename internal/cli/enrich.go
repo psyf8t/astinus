@@ -74,6 +74,10 @@ type enrichOptions struct {
 	// the bundled defaults — same `name` overrides the default;
 	// new names are appended. PRSD-Task-1.
 	rulesFile string
+	// noCluster disables the filesystem-aware clustering pre-pass
+	// in the untracked enricher. Default false → clustering runs.
+	// PRSD-Task-3.
+	noCluster bool
 }
 
 func newEnrichCommand() *cobra.Command {
@@ -125,6 +129,8 @@ add the others.`,
 		"Record LICENSE / README / locale / source / debug-symbol files (debug; default: skip)")
 	flags.StringVar(&opts.rulesFile, "rules-file", "",
 		"Path to YAML with custom path classification rules (merges over defaults)")
+	flags.BoolVar(&opts.noCluster, "no-cluster", false,
+		"Disable filesystem-aware clustering — record every file as a separate untracked component (debug)")
 
 	_ = cmd.MarkFlagRequired("sbom")
 	_ = cmd.MarkFlagRequired("image")
@@ -421,7 +427,8 @@ func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.
 			IncludeRedundant: opts.includeRedundant,
 			IncludeNoise:     opts.includeNoise,
 		},
-		PathClassifier: classifier,
+		PathClassifier:    classifier,
+		DisableClustering: opts.noCluster,
 	})
 
 	cpeEnricher := cpe.New()
