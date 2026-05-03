@@ -18,6 +18,7 @@ import (
 	"github.com/psyf8t/astinus/internal/enrich/attribution"
 	"github.com/psyf8t/astinus/internal/enrich/basediff"
 	"github.com/psyf8t/astinus/internal/enrich/cpe"
+	cpesources "github.com/psyf8t/astinus/internal/enrich/cpe/sources"
 	"github.com/psyf8t/astinus/internal/enrich/dedup"
 	"github.com/psyf8t/astinus/internal/enrich/untracked"
 	"github.com/psyf8t/astinus/internal/enrich/untracked/pathclassifier"
@@ -78,6 +79,12 @@ type enrichOptions struct {
 	// in the untracked enricher. Default false → clustering runs.
 	// PRSD-Task-3.
 	noCluster bool
+	// cpeMode selects the CPE resolver mode (online / offline /
+	// hybrid). Default "hybrid". PRSD-Task-5.
+	cpeMode string
+	// nvdAPIKey is the NVD API key (env: NVD_API_KEY).
+	// PRSD-Task-5.
+	nvdAPIKey string
 }
 
 func newEnrichCommand() *cobra.Command {
@@ -131,6 +138,10 @@ add the others.`,
 		"Path to YAML with custom path classification rules (merges over defaults)")
 	flags.BoolVar(&opts.noCluster, "no-cluster", false,
 		"Disable filesystem-aware clustering — record every file as a separate untracked component (debug)")
+	flags.StringVar(&opts.cpeMode, "cpe-mode", "hybrid",
+		"CPE resolver mode: online | offline | hybrid (default hybrid)")
+	flags.StringVar(&opts.nvdAPIKey, "nvd-api-key", "",
+		"NVD API key (env: NVD_API_KEY). Higher rate limit (50 req / 30s vs 5 req / 30s)")
 
 	_ = cmd.MarkFlagRequired("sbom")
 	_ = cmd.MarkFlagRequired("image")
@@ -431,13 +442,9 @@ func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.
 		DisableClustering: opts.noCluster,
 	})
 
-	cpeEnricher := cpe.New()
-	if opts.offlineDB != "" {
-		chain, err := cpe.ChainWithLocalAndLogger(opts.offlineDB, logger)
-		if err != nil {
-			return nil, fmt.Errorf("--offline-db %q (cpe chain): %w", opts.offlineDB, err)
-		}
-		cpeEnricher = cpe.NewWithResolver(chain)
+	cpeEnricher, err := buildCPEEnricher(opts, tr, logger)
+	if err != nil {
+		return nil, err
 	}
 
 	return []enrich.Enricher{
@@ -561,6 +568,68 @@ func refRequiresNetwork(ref string) bool {
 //	none             → ModeNone (skip)
 //	anything else    → ModeExplicit, with the value as the reference
 //
+// buildCPEEnricher composes the CPE enricher's resolver chain
+// based on operator-supplied flags + env vars.
+//
+// Mode handling:
+//
+//   - `--cpe-mode offline` builds a chain of offline-only Sources
+//     (PatternMatcher + LocalDict + Heuristic). Guaranteed zero
+//     outbound HTTP.
+//   - `--cpe-mode online` adds NVD API + ClearlyDefined Sources.
+//     `--nvd-api-key` (or env NVD_API_KEY) bumps NVD's rate limit.
+//   - `--cpe-mode hybrid` is offline-first, online for the long
+//     tail. Default when the operator passed no flag.
+//   - `--no-network` overrides --cpe-mode and forces offline mode.
+//
+// PRSD-Task-5.
+func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Logger) (*cpe.Enricher, error) {
+	mode := cpesources.Mode(strings.ToLower(strings.TrimSpace(opts.cpeMode)))
+	if !mode.IsKnown() {
+		mode = cpesources.ModeHybrid
+	}
+	if opts.noNetwork {
+		mode = cpesources.ModeOffline
+	}
+
+	srcs := []cpesources.Source{
+		cpesources.NewPatternMatcher(),
+	}
+	if opts.offlineDB != "" {
+		local := cpe.NewLocalDictionaryResolver()
+		local.SetLogger(logger)
+		if err := local.LoadFromDir(opts.offlineDB); err != nil {
+			return nil, fmt.Errorf("--offline-db %q (cpe local dict): %w", opts.offlineDB, err)
+		}
+		if s := cpesources.NewLocalDict(local); s != nil {
+			srcs = append(srcs, s)
+		}
+	}
+	if mode != cpesources.ModeOffline {
+		client := &http.Client{Transport: tr, Timeout: 30 * time.Second}
+		nvdKey := opts.nvdAPIKey
+		if nvdKey == "" {
+			nvdKey = os.Getenv("NVD_API_KEY")
+		}
+		srcs = append(srcs,
+			cpesources.NewNVDAPI(nvdKey, client),
+			cpesources.NewClearlyDefined(client),
+		)
+	}
+	srcs = append(srcs, cpesources.NewHeuristic())
+
+	resolver := cpesources.NewMultiSource(cpesources.Options{
+		Mode:    mode,
+		Sources: srcs,
+		Logger:  logger,
+	})
+	logger.Info("cpe.resolver.configured",
+		"mode", string(mode),
+		"sources", len(resolver.Sources()),
+		"nvd_authenticated", opts.nvdAPIKey != "" || os.Getenv("NVD_API_KEY") != "")
+	return cpe.NewWithResolver(resolver), nil
+}
+
 // buildPathClassifier loads the bundled default rules and (when
 // --rules-file was passed) merges the operator's overrides on top.
 // Returns a nil classifier if the merged rule set fails to compile —
