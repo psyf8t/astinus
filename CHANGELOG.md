@@ -13,7 +13,7 @@ public CLI / output surface.
 
 <!-- Next release entries go here. -->
 
-## v0.0.1 — YYYY-MM-DD (first public release)
+## v0.0.1 — 2026-05-05 (first public release)
 
 This is the first public tag. It bundles three internal
 development sprints — Hardening Sprint #1, Production Readiness
