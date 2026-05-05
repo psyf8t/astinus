@@ -36,7 +36,7 @@ func NewLocalDict(r *cpe.LocalDictionaryResolver) *LocalDictSource {
 func (*LocalDictSource) Name() string { return "local-dictionary" }
 
 // Match implements Source.
-func (l *LocalDictSource) Match(_ context.Context, purl cpe.PURL) ([]cpe.Match, error) {
+func (l *LocalDictSource) Match(_ context.Context, purl cpe.PURL) ([]cpe.Candidate, error) {
 	if l == nil || l.resolver == nil {
 		return nil, nil
 	}

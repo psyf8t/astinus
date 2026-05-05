@@ -103,7 +103,7 @@ func (s *summaryStats) tally(c *model.Component) {
 	if src := c.Properties["astinus:cpe:source"]; src != "" && src != "input" {
 		s.cpeAdded++
 	}
-	if c.Properties["astinus:cpe:confidence"] == "low" {
+	if isLowConfidenceCPE(c.Properties["astinus:cpe:confidence"]) {
 		s.cpeAmbiguous++
 	}
 }

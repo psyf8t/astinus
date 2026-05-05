@@ -26,25 +26,40 @@ const (
 	// SourceHeuristic means the entry was constructed from PURL
 	// shape because no bundled match existed.
 	SourceHeuristic Source = "heuristic"
+	// SourceLocalDict identifies entries from the operator-supplied
+	// offline-db catalogue.
+	SourceLocalDict Source = "local-dictionary"
+	// SourceInput marks CPEs that arrived in the input SBOM
+	// (typically Syft's vendor=name placeholder). Kept as a
+	// candidate during enrichment so authoritative resolver matches
+	// can outrank or coexist with them.
+	SourceInput Source = "input"
 )
 
-// Confidence is a coarse quality grade for a Match.
-type Confidence string
-
-// Confidence values emitted by the resolvers.
+// Confidence score buckets used by the source scorers and
+// orchestrator. Float-valued so callers can compare against the
+// Threshold cutoffs in confidence.go.
 const (
-	// ConfidenceHigh is for matches drawn from the bundled dictionary.
-	ConfidenceHigh Confidence = "high"
-	// ConfidenceLow is for matches built by the heuristic resolver.
-	ConfidenceLow Confidence = "low"
+	// ConfidenceHigh is the score given to exact / curated matches
+	// such as bundled dictionary hits and local-dictionary lookups.
+	ConfidenceHigh = 0.95
+	// ConfidenceMedium is the typical score for an existing input
+	// CPE (Syft placeholder) — kept as primary when nothing better
+	// exists, but outranked by curated resolver answers.
+	ConfidenceMedium = 0.70
+	// ConfidenceLow is the score given to PURL-shape heuristic
+	// guesses — they sit on the AlternativeMin threshold so they
+	// remain visible as alternatives but rarely become primary.
+	ConfidenceLow = 0.50
+	// ConfidenceWeak marks suspicious candidates (NVD substring
+	// noise, etc). Below the AlternativeMin cutoff so they are
+	// rejected by Classify.
+	ConfidenceWeak = 0.30
+	// ConfidenceReject is the floor for hard-rejected candidates
+	// (e.g. hardware-type CPE attached to a software PURL — the
+	// yq → Linksys-router bug from the Sprint 2 benchmark).
+	ConfidenceReject = 0.05
 )
-
-// Match is one CPE candidate for a PURL.
-type Match struct {
-	CPE        string
-	Source     Source
-	Confidence Confidence
-}
 
 // bundledEntry mirrors one record in purl_to_cpe.json.
 type bundledEntry struct {

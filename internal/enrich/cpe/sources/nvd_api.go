@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,12 +75,14 @@ func (*NVDAPISource) Name() string { return "nvd-api" }
 
 // Match implements Source.
 //
-// Queries `/cpes/2.0?keywordSearch=<name>&resultsPerPage=20`. Returns
-// every CPE from the response that includes the PURL's version (or
-// every CPE if the PURL has no version). The version filter cuts down
-// the response size on common names like "log4j" that have hundreds
-// of historical entries.
-func (s *NVDAPISource) Match(ctx context.Context, purl cpe.PURL) ([]cpe.Match, error) {
+// Queries `/cpes/2.0?keywordSearch=<name>&resultsPerPage=20`. Each
+// returned CPE is scored via scoreNVDMatch — the keyword endpoint is
+// substring-matched and routinely yields irrelevant entries (Linksys
+// router CPEs for the binary `yq`, German auction sites for any name
+// containing `v4`). The scorer assigns each Candidate a per-match
+// confidence so the orchestrator can quarantine the noise instead of
+// stamping every result as `confidence=high`. ADR-0029.
+func (s *NVDAPISource) Match(ctx context.Context, purl cpe.PURL) ([]cpe.Candidate, error) {
 	if purl.Name == "" {
 		return nil, nil
 	}
@@ -90,7 +93,7 @@ func (s *NVDAPISource) Match(ctx context.Context, purl cpe.PURL) ([]cpe.Match, e
 	if err != nil {
 		return nil, err
 	}
-	return matchesFromNVDPage(page, purl.Version), nil
+	return candidatesFromNVDPage(page, purl), nil
 }
 
 // fetchPage performs the HTTP GET against the NVD CPE API and parses
@@ -133,25 +136,217 @@ func (s *NVDAPISource) fetchPage(ctx context.Context, name string) (*nvdCPEPage,
 	return &page, nil
 }
 
-// matchesFromNVDPage filters page's products by version (when version
-// is non-empty) and rewraps the survivors as cpe.Match values.
-func matchesFromNVDPage(page *nvdCPEPage, version string) []cpe.Match {
-	out := make([]cpe.Match, 0, len(page.Products))
+// candidatesFromNVDPage scores every entry in the NVD page against
+// the source PURL. Entries below the orchestrator's hard floor get
+// stamped with a RejectedReason so Classify can route them into the
+// rejected bucket without losing the diagnostic trail.
+//
+// Sprint 3 Task 0: replaces the previous matchesFromNVDPage that
+// returned every entry stamped `confidence=high` regardless of the
+// underlying match strength. ADR-0029.
+func candidatesFromNVDPage(page *nvdCPEPage, purl cpe.PURL) []cpe.Candidate {
+	out := make([]cpe.Candidate, 0, len(page.Products))
 	for _, prod := range page.Products {
-		c := prod.CPE.CPEName
-		if c == "" || !cpe.IsValidCPE(c) {
+		raw := prod.CPE.CPEName
+		if raw == "" || !cpe.IsValidCPE(raw) {
 			continue
 		}
-		if version != "" && !cpeNameMatchesVersion(c, version) {
+		parsed, err := cpe.Parse(raw)
+		if err != nil {
 			continue
 		}
-		out = append(out, cpe.Match{
-			CPE:        c,
-			Source:     cpe.Source("nvd-api"),
-			Confidence: cpe.ConfidenceHigh,
-		})
+		// Apply the version sieve only when the PURL pinned one and
+		// the parsed CPE pins something other than a wildcard. This
+		// keeps NVD-style range entries (`-`, `*`) eligible.
+		if purl.Version != "" && !cpeVersionCompatible(parsed.Version, purl.Version) {
+			continue
+		}
+		score, details := scoreNVDMatch(purl, parsed)
+		cand := cpe.Candidate{
+			CPE:          raw,
+			Source:       cpe.Source("nvd-api"),
+			Confidence:   score,
+			Evidence:     fmt.Sprintf("nvd keyword=%q", purl.Name),
+			MatchDetails: details,
+		}
+		switch {
+		case parsed.Part == "h":
+			cand.RejectedReason = "hardware-type CPE for software PURL — see ADR-0029"
+		case score < 0.30:
+			cand.RejectedReason = "weak nvd substring match (vendor/product mismatch)"
+		}
+		out = append(out, cand)
 	}
 	return out
+}
+
+// scoreNVDMatch assigns a [0, 1] confidence to an NVD CPE entry given
+// the PURL it was queried for. Hard rejection (~0.05) for
+// hardware-type CPEs on software PURLs — that's the conduit for the
+// yq → Linksys-router false positive observed in v0.2 benchmark output.
+//
+// Otherwise the score is the weighted sum of vendor + product +
+// version matches, clamped at 1.0. See ADR-0029 §3 for the table.
+//
+// Weights (max 1.10 → clamped):
+//
+//	vendor : 0.50  (exact vendor=namespace OR vendor=name fallback)
+//	product: 0.40  (product=name)
+//	version: 0.20  (exact)
+//
+// Vendor=name is the common NVD convention for npm/maven packages
+// where the project owns the namespace (e.g. `yq:v4`,
+// `expressjs:express`); the fallback gives full vendor weight in
+// that case so the entry can still clear PrimaryMin.
+func scoreNVDMatch(purl cpe.PURL, parsed cpe.CPEv23) (float64, cpe.MatchDetails) {
+	details := cpe.MatchDetails{SearchMethod: "keyword-search"}
+
+	if parsed.Part == "h" {
+		details.VendorMatch = "no-match"
+		details.ProductMatch = "no-match"
+		details.VersionMatch = "n/a"
+		return cpe.ConfidenceReject, details
+	}
+
+	vendorKind, vendorGain := scoreVendor(parsed.Vendor, purl.Namespace, purl.Name)
+	details.VendorMatch = vendorKind
+
+	productKind, productGain := scoreProduct(parsed.Product, purl.Name, purl.Namespace)
+	details.ProductMatch = productKind
+
+	versionKind, versionGain := scoreVersion(parsed.Version, purl.Version)
+	details.VersionMatch = versionKind
+
+	score := vendorGain + productGain + versionGain
+	if score > 1.0 {
+		score = 1.0
+	}
+	return score, details
+}
+
+// scoreVendor classifies how the CPE vendor relates to the PURL.
+// Two paths reach the full vendor weight:
+//
+//   - vendor matches PURL namespace exactly (the org-controlled
+//     namespace pattern, e.g. maven `org.apache.logging.log4j`).
+//   - vendor matches PURL name exactly (the project-owns-namespace
+//     pattern: `yq:v4`, `expressjs:express`).
+//
+// Lower scores reflect substring / fuzzy hits — those are usually
+// the cheap NVD keyword false positives.
+func scoreVendor(cpeVendor, purlNamespace, purlName string) (string, float64) {
+	v := strings.ToLower(cpeVendor)
+	if v == "" {
+		return "no-match", 0.0
+	}
+	if k, g := vendorMatchExact(v, strings.ToLower(purlNamespace), strings.ToLower(purlName)); k != "" {
+		return k, g
+	}
+	if k, g := vendorMatchSubstring(v, strings.ToLower(purlNamespace), strings.ToLower(purlName)); k != "" {
+		return k, g
+	}
+	return "no-match", 0.0
+}
+
+// vendorMatchExact returns the (kind, gain) pair for an exact or
+// normalized vendor match against either the namespace or the name;
+// returns ("", 0) when neither side matches at full weight.
+func vendorMatchExact(v, ns, nm string) (string, float64) {
+	switch {
+	case ns != "" && v == ns:
+		return "exact", 0.50
+	case nm != "" && v == nm:
+		return "known-mapping", 0.50
+	case ns != "" && normalizeAttr(v) == normalizeAttr(ns):
+		return "normalized", 0.40
+	case nm != "" && normalizeAttr(v) == normalizeAttr(nm):
+		return "normalized", 0.40
+	}
+	return "", 0.0
+}
+
+// vendorMatchSubstring captures the weak substring fallback for
+// vendor matches; surfaced separately so scoreVendor stays under
+// the gocyclo cap.
+func vendorMatchSubstring(v, ns, nm string) (string, float64) {
+	if ns != "" && (strings.Contains(v, ns) || strings.Contains(ns, v)) {
+		return "substring", 0.10
+	}
+	if nm != "" && (strings.Contains(v, nm) || strings.Contains(nm, v)) {
+		return "substring", 0.10
+	}
+	return "", 0.0
+}
+
+// scoreProduct classifies how the CPE product relates to the PURL.
+// Exact name match is the strongest signal; normalized (dash ↔
+// underscore) is close behind. A namespace-segment fallback covers
+// the unusual pattern where NVD records keep the project name as
+// product on a different vendor (rare).
+func scoreProduct(cpeProduct, purlName, purlNamespace string) (string, float64) {
+	p := strings.ToLower(cpeProduct)
+	nm := strings.ToLower(purlName)
+	if p == "" || nm == "" {
+		return "no-match", 0.0
+	}
+	switch {
+	case p == nm:
+		return "exact", 0.40
+	case normalizeAttr(p) == normalizeAttr(nm):
+		return "normalized", 0.30
+	case purlNamespace != "" && p == lastSegment(strings.ToLower(purlNamespace)):
+		return "namespace-segment", 0.20
+	case strings.Contains(p, nm) || strings.Contains(nm, p):
+		return "substring", 0.10
+	}
+	return "no-match", 0.0
+}
+
+// scoreVersion grants partial credit when the PURL pins a version and
+// the CPE does too. NVD wildcard entries (`*`, `-`) count as a soft
+// match: they cover any version including ours, but don't prove
+// anything specific.
+func scoreVersion(cpeVersion, purlVersion string) (string, float64) {
+	if purlVersion == "" {
+		return "wildcard", 0.05
+	}
+	if cpeVersion == purlVersion {
+		return "exact", 0.20
+	}
+	if cpeVersion == "*" || cpeVersion == "-" || cpeVersion == "" {
+		return "wildcard", 0.10
+	}
+	return "mismatch", 0.0
+}
+
+// lastSegment returns the substring after the final '/' or '.' —
+// useful when a PURL namespace like `org.apache.logging.log4j`
+// should be reduced to its tail (`log4j`) for product comparison.
+func lastSegment(s string) string {
+	if i := strings.LastIndexAny(s, "/."); i >= 0 {
+		return s[i+1:]
+	}
+	return s
+}
+
+// normalizeAttr canonicalises common token variations so that
+// dash/underscore differences don't drag a real match down to a
+// substring score.
+func normalizeAttr(s string) string {
+	r := strings.ReplaceAll(s, "-", "_")
+	r = strings.ReplaceAll(r, ".", "_")
+	return r
+}
+
+// cpeVersionCompatible reports whether cpeVersion can plausibly
+// describe purlVersion: equality, NVD wildcards, or empty CPE
+// version slot all qualify.
+func cpeVersionCompatible(cpeVersion, purlVersion string) bool {
+	switch cpeVersion {
+	case "*", "-", "":
+		return true
+	}
+	return cpeVersion == purlVersion
 }
 
 // RequiresNetwork implements Source.
@@ -173,22 +368,6 @@ type nvdCPEPage struct {
 			CPEName string `json:"cpeName"`
 		} `json:"cpe"`
 	} `json:"products"`
-}
-
-// cpeNameMatchesVersion reports whether the version segment of cpeName
-// is a wildcard, the literal version, or a prefix-style match. This
-// is intentionally lenient — NVD often records ranges in the version
-// field (`-`, `*`) and the orchestrator wants to keep those entries
-// rather than drop them.
-func cpeNameMatchesVersion(cpeName, version string) bool {
-	parsed, err := cpe.Parse(cpeName)
-	if err != nil {
-		return true // be lenient on parse failure; downstream filters can drop
-	}
-	if parsed.Version == "*" || parsed.Version == "-" || parsed.Version == "" {
-		return true
-	}
-	return parsed.Version == version
 }
 
 // ─── tokenBucket ─────────────────────────────────────────────────────

@@ -4,10 +4,21 @@ import "strings"
 
 // Resolver yields zero or more CPE candidates for a parsed PURL.
 type Resolver interface {
-	// Resolve returns 0 or more Match candidates. An empty slice +
-	// nil error means "no match"; non-nil error is reserved for true
-	// failures (the bundled JSON did not load, etc.).
-	Resolve(p PURL) []Match
+	// Resolve returns 0 or more Candidate proposals. An empty slice
+	// + nil error means "no match"; non-nil error is reserved for
+	// true failures (the bundled JSON did not load, etc.).
+	Resolve(p PURL) []Candidate
+}
+
+// versionMatchKind classifies how the PURL version was honoured by
+// the resolver. Used to populate Candidate.MatchDetails.VersionMatch
+// so operators (and `--include-rejected-cpe` debug output) can see
+// which proposals are exact-version vs wildcard.
+func versionMatchKind(version string) string {
+	if version == "" {
+		return "wildcard"
+	}
+	return "exact"
 }
 
 // BundledResolver resolves PURLs against the embedded bundled
@@ -20,15 +31,22 @@ type BundledResolver struct {
 func NewBundledResolver() *BundledResolver { return &BundledResolver{Dict: Default()} }
 
 // Resolve implements Resolver.
-func (b *BundledResolver) Resolve(p PURL) []Match {
+func (b *BundledResolver) Resolve(p PURL) []Candidate {
 	if b.Dict == nil {
 		return nil
 	}
 	if entry, ok := b.Dict.Lookup(p.Type, p.Namespace, p.Name); ok {
-		return []Match{{
+		return []Candidate{{
 			CPE:        Build(entry.Vendor, entry.Product, p.Version),
 			Source:     SourceBundled,
 			Confidence: ConfidenceHigh,
+			Evidence:   "bundled purl_to_cpe.json hit",
+			MatchDetails: MatchDetails{
+				VendorMatch:  "known-mapping",
+				ProductMatch: "known-mapping",
+				VersionMatch: versionMatchKind(p.Version),
+				SearchMethod: "dictionary-lookup",
+			},
 		}}
 	}
 	return nil
@@ -57,15 +75,29 @@ type HeuristicResolver struct{}
 func NewHeuristicResolver() *HeuristicResolver { return &HeuristicResolver{} }
 
 // Resolve implements Resolver.
-func (h *HeuristicResolver) Resolve(p PURL) []Match {
+//
+// Confidence is ConfidenceMedium (0.70): heuristic guesses of the
+// shape vendor=name=name are correct for the long tail of npm/cargo
+// /gem packages where the vendor and product collapse to the same
+// token. They sit at the PrimaryMin floor so they remain primary
+// when no curated source has anything better, but any bundled or
+// dictionary hit (ConfidenceHigh = 0.95) still wins. ADR-0029.
+func (h *HeuristicResolver) Resolve(p PURL) []Candidate {
 	if p.Name == "" {
 		return nil
 	}
 	vendor, product := guessVendorProduct(p)
-	return []Match{{
+	return []Candidate{{
 		CPE:        Build(vendor, product, p.Version),
 		Source:     SourceHeuristic,
-		Confidence: ConfidenceLow,
+		Confidence: ConfidenceMedium,
+		Evidence:   "PURL-shape guess",
+		MatchDetails: MatchDetails{
+			VendorMatch:  "fuzzy",
+			ProductMatch: "fuzzy",
+			VersionMatch: versionMatchKind(p.Version),
+			SearchMethod: "purl-direct",
+		},
 	}}
 }
 
@@ -114,7 +146,7 @@ func NewChain(resolvers ...Resolver) *Chain {
 // resolver and stop — we don't mix high and low confidence in one
 // answer. This way the bundled mapping always wins when it has an
 // entry; the heuristic only kicks in when nobody else does.
-func (c *Chain) Resolve(p PURL) []Match {
+func (c *Chain) Resolve(p PURL) []Candidate {
 	for _, r := range c.resolvers {
 		if out := r.Resolve(p); len(out) > 0 {
 			return out

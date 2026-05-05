@@ -29,7 +29,10 @@ func TestEnrichKnownPURLBundled(t *testing.T) {
 	if c.Properties["astinus:cpe:source"] != "bundled" {
 		t.Errorf("source = %q", c.Properties["astinus:cpe:source"])
 	}
-	if c.Properties["astinus:cpe:confidence"] != "high" {
+	// Sprint 3 Task 0: confidence is now a numeric stamp ("0.95"
+	// for bundled / curated hits) instead of the legacy "high" /
+	// "low" labels. ADR-0029.
+	if c.Properties["astinus:cpe:confidence"] != "0.95" {
 		t.Errorf("confidence = %q", c.Properties["astinus:cpe:confidence"])
 	}
 }
@@ -50,20 +53,29 @@ func TestEnrichUnknownPURLHeuristic(t *testing.T) {
 	if c.Properties["astinus:cpe:source"] != "heuristic" {
 		t.Errorf("source = %q", c.Properties["astinus:cpe:source"])
 	}
-	if c.Properties["astinus:cpe:confidence"] != "low" {
+	// Heuristic guesses now score ConfidenceMedium = 0.70 — at the
+	// PrimaryMin floor so they remain primary when no curated source
+	// has anything better. ADR-0029.
+	if c.Properties["astinus:cpe:confidence"] != "0.70" {
 		t.Errorf("confidence = %q", c.Properties["astinus:cpe:confidence"])
 	}
 }
 
-// TestEnrichPreservesExistingCPEAndAppendsResolverMatch — post-Stage-13
-// hardening Task 5: when a component already has CPEs (typical: Syft
-// fills every component with a placeholder vendor=name CPE that
-// almost never matches NVD), the enricher MUST validate the existing
-// CPE AND append the resolver's authoritative CPE alongside.
-// Previously the enricher bailed early on existing CPEs, which is
-// why production output had 0 added CPEs despite having an
-// authoritative bundled mapping.
-func TestEnrichPreservesExistingCPEAndAppendsResolverMatch(t *testing.T) {
+// TestEnrichPreservesExistingCPEAndPromotesBundledToPrimary —
+// post-S3-Task-0 successor of TestEnrichPreservesExistingCPEAndAppendsResolverMatch.
+//
+// When a Component already carries a CPE (typical: Syft fills every
+// component with a placeholder vendor=name CPE), the enricher must
+//   - elect the higher-confidence resolver match as the primary `cpe`,
+//   - retain the placeholder as `astinus:cpe:alternative:N` so the
+//     original input data is not silently lost,
+//   - stamp `astinus:cpe:validated = true` so downstream consumers
+//     can tell we've checked the input.
+//
+// The previous schema (one slice in c.CPEs holding both) was the
+// vector for the v0.2 false-positive bug — vulnerability scanners
+// pulled in any CPE in the slice as authoritative.
+func TestEnrichPreservesExistingCPEAndPromotesBundledToPrimary(t *testing.T) {
 	preset := "cpe:2.3:a:custom:thing:1.0:*:*:*:*:*:*:*"
 	sbom := &model.SBOM{
 		Components: []model.Component{
@@ -74,36 +86,40 @@ func TestEnrichPreservesExistingCPEAndAppendsResolverMatch(t *testing.T) {
 		t.Fatalf("Enrich: %v", err)
 	}
 	c := sbom.Components[0]
-	hasPreset := false
-	for _, cpe := range c.CPEs {
-		if cpe == preset {
-			hasPreset = true
+	if len(c.CPEs) != 1 {
+		t.Fatalf("CPEs = %v, want exactly one (primary only)", c.CPEs)
+	}
+	if c.CPEs[0] == preset {
+		t.Errorf("primary CPE should be the bundled hit, not the placeholder: %v", c.CPEs)
+	}
+	// Preset must survive as an alternative.
+	foundAlt := false
+	for k, v := range c.Properties {
+		if strings.HasPrefix(k, "astinus:cpe:alternative:") &&
+			!strings.HasSuffix(k, ":source") &&
+			!strings.HasSuffix(k, ":confidence") &&
+			v == preset {
+			foundAlt = true
 		}
 	}
-	if !hasPreset {
-		t.Errorf("preset CPE was dropped: %v", c.CPEs)
-	}
-	if len(c.CPEs) < 2 {
-		t.Errorf("CPEs = %v, want preset + resolver match", c.CPEs)
+	if !foundAlt {
+		t.Errorf("preset CPE was not retained as alternative: %v", c.Properties)
 	}
 	if c.Properties["astinus:cpe:validated"] != "true" {
 		t.Errorf("validated stamp = %q", c.Properties["astinus:cpe:validated"])
 	}
-	if c.Properties["astinus:cpe:source"] == "" {
-		t.Errorf("source stamp missing: %v", c.Properties)
+	if c.Properties["astinus:cpe:source"] != "bundled" {
+		t.Errorf("primary source = %q, want bundled", c.Properties["astinus:cpe:source"])
 	}
 }
 
-// TestEnrichBundledCPEAppendedAlongsideSyftPlaceholder — exercises
-// the canonical Syft pattern: every component has a placeholder
-// `cpe:2.3:a:lodash:lodash:...` from Syft AND a PURL. The enricher
-// should APPEND the bundled `cpe:2.3:a:lodash:lodash:...` (which
-// for lodash happens to already match the heuristic; pick a package
-// where bundled differs from heuristic).
-func TestEnrichBundledCPEAppendedAlongsideSyftPlaceholder(t *testing.T) {
-	// log4j-core's NVD vendor:product is apache:log4j — different
-	// from the heuristic's "log4j-core:log4j-core". Bundled MUST be
-	// the one appended.
+// TestEnrichBundledCPEWinsOverSyftPlaceholder — exercises the
+// canonical Syft pattern: every component has a placeholder
+// `cpe:2.3:a:log4j-core:log4j-core:...` from Syft AND a PURL whose
+// bundled mapping resolves to the canonical apache:log4j CPE. The
+// bundled answer must become primary; the placeholder lands as an
+// alternative.
+func TestEnrichBundledCPEWinsOverSyftPlaceholder(t *testing.T) {
 	syftPlaceholder := "cpe:2.3:a:log4j-core:log4j-core:2.14.1:*:*:*:*:*:*:*"
 	sbom := &model.SBOM{Components: []model.Component{{
 		Name:    "log4j-core",
@@ -115,21 +131,15 @@ func TestEnrichBundledCPEAppendedAlongsideSyftPlaceholder(t *testing.T) {
 		t.Fatalf("Enrich: %v", err)
 	}
 	c := sbom.Components[0]
-	wantBundled := "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"
-	hasBundled := false
-	for _, cpe := range c.CPEs {
-		if cpe == wantBundled {
-			hasBundled = true
-		}
-	}
-	if !hasBundled {
-		t.Errorf("bundled CPE %q not appended; got %v", wantBundled, c.CPEs)
+	want := "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"
+	if len(c.CPEs) != 1 || c.CPEs[0] != want {
+		t.Errorf("primary CPEs = %v, want [%q]", c.CPEs, want)
 	}
 	if c.Properties["astinus:cpe:source"] != "bundled" {
 		t.Errorf("source = %q, want bundled", c.Properties["astinus:cpe:source"])
 	}
-	if c.Properties["astinus:cpe:confidence"] != "high" {
-		t.Errorf("confidence = %q, want high", c.Properties["astinus:cpe:confidence"])
+	if c.Properties["astinus:cpe:confidence"] != "0.95" {
+		t.Errorf("confidence = %q, want 0.95", c.Properties["astinus:cpe:confidence"])
 	}
 }
 
@@ -166,8 +176,8 @@ func TestEnrichStatsLogged(t *testing.T) {
 }
 
 // TestEnrichValidatesAndDropsInvalidExisting — invalid CPE strings
-// are dropped during validation; a resolver match is still appended
-// when a PURL is present.
+// no longer survive in `c.CPEs` (they get classified as rejected
+// candidates), and a valid resolver match is elected primary.
 func TestEnrichValidatesAndDropsInvalidExisting(t *testing.T) {
 	good := "cpe:2.3:a:vendor:product:1.0:*:*:*:*:*:*:*"
 	bad := "not a cpe"
@@ -180,19 +190,10 @@ func TestEnrichValidatesAndDropsInvalidExisting(t *testing.T) {
 		t.Fatalf("Enrich: %v", err)
 	}
 	c := sbom.Components[0]
-	for _, cpe := range c.CPEs {
-		if cpe == bad {
-			t.Errorf("bad CPE was kept: %v", c.CPEs)
+	for _, cpeStr := range c.CPEs {
+		if cpeStr == bad {
+			t.Errorf("invalid CPE was kept in primary set: %v", c.CPEs)
 		}
-	}
-	hasGood := false
-	for _, cpe := range c.CPEs {
-		if cpe == good {
-			hasGood = true
-		}
-	}
-	if !hasGood {
-		t.Errorf("good CPE was dropped: %v", c.CPEs)
 	}
 	if c.Properties["astinus:cpe:validated"] != "partial" {
 		t.Errorf("validated stamp = %q", c.Properties["astinus:cpe:validated"])

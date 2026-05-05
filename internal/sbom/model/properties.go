@@ -64,4 +64,12 @@ const (
 	PropertyComplianceHighCount     = "astinus:compliance:high-count"
 	PropertyComplianceMediumCount   = "astinus:compliance:medium-count"
 	PropertyComplianceLowCount      = "astinus:compliance:low-count"
+	// PropertyComplianceInfoCount is the count of SeverityInfo
+	// findings (added in S3 Task 2 — informational findings emitted
+	// by the per-ecosystem severity policy).
+	PropertyComplianceInfoCount = "astinus:compliance:info-count"
+	// PropertyComplianceActionableCount is the sum of
+	// critical + high + medium findings — the value security teams
+	// should look at first. S3 Task 2.
+	PropertyComplianceActionableCount = "astinus:compliance:actionable-findings-count"
 )

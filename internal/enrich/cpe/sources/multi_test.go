@@ -16,7 +16,7 @@ type fakeSource struct {
 	name      string
 	priority  int
 	online    bool
-	matches   []cpe.Match
+	matches   []cpe.Candidate
 	err       error
 	callCount int
 }
@@ -24,7 +24,7 @@ type fakeSource struct {
 func (f *fakeSource) Name() string          { return f.name }
 func (f *fakeSource) Priority() int         { return f.priority }
 func (f *fakeSource) RequiresNetwork() bool { return f.online }
-func (f *fakeSource) Match(_ context.Context, _ cpe.PURL) ([]cpe.Match, error) {
+func (f *fakeSource) Match(_ context.Context, _ cpe.PURL) ([]cpe.Candidate, error) {
 	f.callCount++
 	return f.matches, f.err
 }
@@ -33,9 +33,9 @@ func (f *fakeSource) Match(_ context.Context, _ cpe.PURL) ([]cpe.Match, error) {
 
 func TestModeOfflineDropsOnlineSources(t *testing.T) {
 	online := &fakeSource{name: "nvd", priority: 80, online: true,
-		matches: []cpe.Match{{CPE: "cpe:online", Confidence: cpe.ConfidenceHigh}}}
+		matches: []cpe.Candidate{{CPE: "cpe:online", Confidence: cpe.ConfidenceHigh}}}
 	offline := &fakeSource{name: "bundled", priority: 100, online: false,
-		matches: []cpe.Match{{CPE: "cpe:offline", Confidence: cpe.ConfidenceHigh}}}
+		matches: []cpe.Candidate{{CPE: "cpe:offline", Confidence: cpe.ConfidenceHigh}}}
 
 	r := NewMultiSource(Options{
 		Mode:    ModeOffline,
@@ -100,9 +100,9 @@ func TestNilSourcesDropped(t *testing.T) {
 
 func TestHybridSkipsOnlineWhenOfflineHighConfidence(t *testing.T) {
 	offlineHigh := &fakeSource{name: "bundled", priority: 100, online: false,
-		matches: []cpe.Match{{CPE: "cpe:bundled", Confidence: cpe.ConfidenceHigh}}}
+		matches: []cpe.Candidate{{CPE: "cpe:bundled", Confidence: cpe.ConfidenceHigh}}}
 	online := &fakeSource{name: "nvd", priority: 80, online: true,
-		matches: []cpe.Match{{CPE: "cpe:nvd", Confidence: cpe.ConfidenceHigh}}}
+		matches: []cpe.Candidate{{CPE: "cpe:nvd", Confidence: cpe.ConfidenceHigh}}}
 
 	r := NewMultiSource(Options{
 		Mode:    ModeHybrid,
@@ -119,9 +119,9 @@ func TestHybridSkipsOnlineWhenOfflineHighConfidence(t *testing.T) {
 
 func TestHybridQueriesOnlineWhenOfflineLowConfidence(t *testing.T) {
 	offlineLow := &fakeSource{name: "heuristic", priority: 50, online: false,
-		matches: []cpe.Match{{CPE: "cpe:heuristic", Confidence: cpe.ConfidenceLow}}}
+		matches: []cpe.Candidate{{CPE: "cpe:heuristic", Confidence: cpe.ConfidenceLow}}}
 	online := &fakeSource{name: "nvd", priority: 80, online: true,
-		matches: []cpe.Match{{CPE: "cpe:nvd", Confidence: cpe.ConfidenceHigh}}}
+		matches: []cpe.Candidate{{CPE: "cpe:nvd", Confidence: cpe.ConfidenceHigh}}}
 
 	r := NewMultiSource(Options{
 		Mode:    ModeHybrid,
@@ -140,7 +140,7 @@ func TestHybridQueriesOnlineWhenOfflineLowConfidence(t *testing.T) {
 
 func TestCacheAvoidsRepeatedSourceCalls(t *testing.T) {
 	s := &fakeSource{name: "x", priority: 100,
-		matches: []cpe.Match{{CPE: "cpe:test", Confidence: cpe.ConfidenceHigh}}}
+		matches: []cpe.Candidate{{CPE: "cpe:test", Confidence: cpe.ConfidenceHigh}}}
 	r := NewMultiSource(Options{Sources: []Source{s}})
 	purl := cpe.PURL{Type: "npm", Name: "lodash", Version: "1"}
 	for i := 0; i < 5; i++ {
@@ -171,7 +171,7 @@ func TestCacheRecordsEmptyResults(t *testing.T) {
 func TestErrorDoesNotAbortChain(t *testing.T) {
 	broken := &fakeSource{name: "broken", priority: 100, err: errors.New("boom")}
 	working := &fakeSource{name: "working", priority: 80,
-		matches: []cpe.Match{{CPE: "cpe:test", Confidence: cpe.ConfidenceHigh}}}
+		matches: []cpe.Candidate{{CPE: "cpe:test", Confidence: cpe.ConfidenceHigh}}}
 	r := NewMultiSource(Options{Sources: []Source{broken, working}})
 	out := r.Resolve(cpe.PURL{Type: "npm", Name: "x"})
 	if len(out) == 0 {
@@ -251,7 +251,7 @@ func TestCacheGetSet(t *testing.T) {
 	if _, ok := c.Get("k"); ok {
 		t.Error("empty cache should miss")
 	}
-	c.Set("k", []cpe.Match{{CPE: "cpe:x"}})
+	c.Set("k", []cpe.Candidate{{CPE: "cpe:x"}})
 	got, ok := c.Get("k")
 	if !ok || len(got) != 1 || got[0].CPE != "cpe:x" {
 		t.Errorf("Get = (%+v, %v)", got, ok)

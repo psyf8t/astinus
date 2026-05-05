@@ -33,7 +33,7 @@ func NewPatternMatcher() *PatternMatcher {
 func (*PatternMatcher) Name() string { return "pattern-matcher" }
 
 // Match implements Source.
-func (p *PatternMatcher) Match(_ context.Context, purl cpe.PURL) ([]cpe.Match, error) {
+func (p *PatternMatcher) Match(_ context.Context, purl cpe.PURL) ([]cpe.Candidate, error) {
 	return p.resolver.Resolve(purl), nil
 }
 
@@ -60,7 +60,7 @@ func NewHeuristic() *HeuristicSource {
 func (*HeuristicSource) Name() string { return "heuristic" }
 
 // Match implements Source.
-func (h *HeuristicSource) Match(_ context.Context, purl cpe.PURL) ([]cpe.Match, error) {
+func (h *HeuristicSource) Match(_ context.Context, purl cpe.PURL) ([]cpe.Candidate, error) {
 	return h.resolver.Resolve(purl), nil
 }
 

@@ -6,7 +6,7 @@ import (
 	"github.com/psyf8t/astinus/internal/enrich/cpe"
 )
 
-// Cache is the in-memory PURL → []Match memo the orchestrator
+// Cache is the in-memory PURL → []Candidate memo the orchestrator
 // consults before walking the Source chain.
 //
 // The cache is per-orchestrator (per-enricher invocation). It is NOT
@@ -18,19 +18,19 @@ import (
 // Concurrency: safe for concurrent use.
 type Cache struct {
 	mu      sync.RWMutex
-	entries map[string][]cpe.Match
+	entries map[string][]cpe.Candidate
 }
 
 // NewCache returns an empty Cache.
 func NewCache() *Cache {
-	return &Cache{entries: map[string][]cpe.Match{}}
+	return &Cache{entries: map[string][]cpe.Candidate{}}
 }
 
 // Get returns the cached candidates for purl plus a hit indicator.
 // A hit with an empty slice means "we resolved this PURL before and
 // nobody had anything to say"; the orchestrator should not re-walk
 // the chain.
-func (c *Cache) Get(purl string) ([]cpe.Match, bool) {
+func (c *Cache) Get(purl string) ([]cpe.Candidate, bool) {
 	if c == nil {
 		return nil, false
 	}
@@ -40,14 +40,14 @@ func (c *Cache) Get(purl string) ([]cpe.Match, bool) {
 	return v, ok
 }
 
-// Set stores matches under purl.
-func (c *Cache) Set(purl string, matches []cpe.Match) {
+// Set stores candidates under purl.
+func (c *Cache) Set(purl string, cands []cpe.Candidate) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[purl] = matches
+	c.entries[purl] = cands
 }
 
 // Size reports the number of cached entries.

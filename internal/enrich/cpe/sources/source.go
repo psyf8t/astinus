@@ -57,11 +57,12 @@ type Source interface {
 	// `astinus:cpe:source` Component properties.
 	Name() string
 
-	// Match returns 0 or more CPE candidates for the parsed PURL.
-	// The orchestrator does NOT deduplicate — Sources that all
-	// agree on the same CPE produce repeated entries the
-	// orchestrator collapses via `cpe.appendUnique` downstream.
-	Match(ctx context.Context, p cpe.PURL) ([]cpe.Match, error)
+	// Match returns 0 or more Candidate proposals for the parsed
+	// PURL. The orchestrator deduplicates and classifies by
+	// confidence downstream (cpe.DedupeCandidates + cpe.Classify),
+	// so Sources are free to return overlapping CPEs with their own
+	// per-candidate confidence + provenance.
+	Match(ctx context.Context, p cpe.PURL) ([]cpe.Candidate, error)
 
 	// RequiresNetwork is true for Sources whose Match makes outbound
 	// HTTP calls. The orchestrator filters these out in ModeOffline

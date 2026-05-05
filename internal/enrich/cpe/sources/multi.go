@@ -96,14 +96,14 @@ func (r *MultiSourceResolver) Mode() Mode { return r.mode }
 //  2. For each Source (in priority order, Mode-filtered):
 //     - Call Match. Errors are logged and dropped (the chain
 //     continues with the next Source).
-//     - Append every returned Match to the accumulator.
+//     - Append every returned Candidate to the accumulator.
 //     - When Mode == ModeHybrid AND we have at least one
 //     high-confidence offline match, stop walking online
 //     Sources — we don't pay the network cost when offline
 //     already gave us an authoritative answer.
 //  3. Cache the result (including the empty case) so a second
 //     component with the same PURL doesn't re-walk.
-func (r *MultiSourceResolver) Resolve(p cpe.PURL) []cpe.Match {
+func (r *MultiSourceResolver) Resolve(p cpe.PURL) []cpe.Candidate {
 	return r.resolveCtx(context.Background(), p)
 }
 
@@ -112,17 +112,17 @@ func (r *MultiSourceResolver) Resolve(p cpe.PURL) []cpe.Match {
 // Sources need it for cancellation, so we fabricate a Background
 // context in Resolve and surface ResolveCtx for callers that hold a
 // real context.
-func (r *MultiSourceResolver) ResolveCtx(ctx context.Context, p cpe.PURL) []cpe.Match {
+func (r *MultiSourceResolver) ResolveCtx(ctx context.Context, p cpe.PURL) []cpe.Candidate {
 	return r.resolveCtx(ctx, p)
 }
 
-func (r *MultiSourceResolver) resolveCtx(ctx context.Context, p cpe.PURL) []cpe.Match {
+func (r *MultiSourceResolver) resolveCtx(ctx context.Context, p cpe.PURL) []cpe.Candidate {
 	key := purlCacheKey(p)
 	if cached, ok := r.cache.Get(key); ok {
 		return cached
 	}
 
-	var all []cpe.Match
+	var all []cpe.Candidate
 	haveOfflineHigh := false
 	for _, src := range r.sources {
 		// In hybrid mode, skip online sources when an offline
@@ -130,7 +130,7 @@ func (r *MultiSourceResolver) resolveCtx(ctx context.Context, p cpe.PURL) []cpe.
 		if r.mode == ModeHybrid && haveOfflineHigh && src.RequiresNetwork() {
 			continue
 		}
-		matches, err := src.Match(ctx, p)
+		cands, err := src.Match(ctx, p)
 		if err != nil {
 			r.logger.Debug("cpe.source.error",
 				"source", src.Name(),
@@ -138,11 +138,11 @@ func (r *MultiSourceResolver) resolveCtx(ctx context.Context, p cpe.PURL) []cpe.
 				"err", err.Error())
 			continue
 		}
-		if len(matches) == 0 {
+		if len(cands) == 0 {
 			continue
 		}
-		all = append(all, matches...)
-		if !src.RequiresNetwork() && hasHighConfidence(matches) {
+		all = append(all, cands...)
+		if !src.RequiresNetwork() && hasHighConfidence(cands) {
 			haveOfflineHigh = true
 		}
 	}
@@ -159,11 +159,15 @@ func purlCacheKey(p cpe.PURL) string {
 	return out
 }
 
-// hasHighConfidence reports whether matches contains at least one
-// `ConfidenceHigh` entry.
-func hasHighConfidence(matches []cpe.Match) bool {
-	for _, m := range matches {
-		if m.Confidence == cpe.ConfidenceHigh {
+// hasHighConfidence reports whether cands contains at least one
+// candidate scoring at or above the primary-min threshold. This
+// gates the hybrid-mode early exit so we only skip online lookups
+// when an offline source has produced a result good enough to be
+// the Component's primary CPE.
+func hasHighConfidence(cands []cpe.Candidate) bool {
+	floor := cpe.DefaultThreshold().PrimaryMin
+	for _, c := range cands {
+		if c.Confidence >= floor {
 			return true
 		}
 	}

@@ -36,7 +36,7 @@ func TestLocalDictResolverByPurl(t *testing.T) {
 	if len(matches) != 1 {
 		t.Fatalf("matches = %v", matches)
 	}
-	if matches[0].Source != SourceBundled || matches[0].Confidence != ConfidenceHigh {
+	if matches[0].Source != SourceLocalDict || matches[0].Confidence != ConfidenceHigh {
 		t.Errorf("got %+v", matches[0])
 	}
 	if matches[0].CPE != "cpe:2.3:a:expressjs:express:4.18.2:*:*:*:*:*:*:*" {

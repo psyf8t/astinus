@@ -36,7 +36,7 @@ func TestHeuristicResolverPypi(t *testing.T) {
 	if out[0].CPE != want {
 		t.Errorf("CPE = %q, want %q", out[0].CPE, want)
 	}
-	if out[0].Confidence != ConfidenceLow || out[0].Source != SourceHeuristic {
+	if out[0].Confidence != ConfidenceMedium || out[0].Source != SourceHeuristic {
 		t.Errorf("got %+v", out[0])
 	}
 }

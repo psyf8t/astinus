@@ -8,22 +8,36 @@ package policy
 type Severity int
 
 // Recognised severities, in ascending order.
+//
+// Explicit integer values (not iota) so SeverityIgnored can sit
+// below SeverityInfo without shifting the established ordering of
+// the rest. AtLeast(SeverityInfo) returns false on Ignored, which
+// is how the compliance enricher suppresses Ignored findings from
+// output and counters. S3 Task 2 / ADR-0031.
 const (
-	// SeverityInfo is informational; never blocks a `--fail-on` gate.
-	SeverityInfo Severity = iota
+	// SeverityIgnored marks findings that should be suppressed
+	// entirely — not stamped on the SBOM, not counted in the
+	// per-severity metrics, not visible to a `--fail-on` gate.
+	// Used for cases where the rule fires in principle but the
+	// gap is irrelevant for that particular Component (e.g.
+	// NTIA-SUPPLIER on a `type=file` Component). S3 Task 2.
+	SeverityIgnored Severity = -1
+	// SeverityInfo is informational; never blocks a `--fail-on`
+	// gate but does appear in output and counters.
+	SeverityInfo Severity = 0
 	// SeverityLow is a minor compliance gap (e.g. missing
 	// vulnerability-disclosure URL on a third-party library).
-	SeverityLow
+	SeverityLow Severity = 1
 	// SeverityMedium covers gaps that an enterprise auditor would
 	// flag but that are recoverable (missing supplier name on a
 	// known-vendor package).
-	SeverityMedium
+	SeverityMedium Severity = 2
 	// SeverityHigh is a violation an auditor will not let pass
 	// (missing version on a Component, missing SBOM Author).
-	SeverityHigh
+	SeverityHigh Severity = 3
 	// SeverityCritical is a structural failure (Component without
 	// a Name, malformed CycloneDX shape).
-	SeverityCritical
+	SeverityCritical Severity = 4
 )
 
 // String renders the severity as the lowercase name used in
@@ -40,6 +54,8 @@ func (s Severity) String() string {
 		return "medium"
 	case SeverityLow:
 		return "low"
+	case SeverityIgnored:
+		return "ignored"
 	default:
 		return "info"
 	}
@@ -51,9 +67,9 @@ func (s Severity) String() string {
 func (s Severity) AtLeast(floor Severity) bool { return s >= floor }
 
 // ParseSeverity returns the Severity for the lowercase string name
-// (`critical` / `high` / `medium` / `low` / `info`). Unknown
-// values yield SeverityInfo + ok=false so callers can decide
-// whether to default or error.
+// (`critical` / `high` / `medium` / `low` / `info` / `ignored`).
+// Unknown values yield SeverityInfo + ok=false so callers can
+// decide whether to default or error.
 func ParseSeverity(s string) (Severity, bool) {
 	switch s {
 	case "critical":
@@ -66,6 +82,8 @@ func ParseSeverity(s string) (Severity, bool) {
 		return SeverityLow, true
 	case "info", "":
 		return SeverityInfo, true
+	case "ignored":
+		return SeverityIgnored, true
 	default:
 		return SeverityInfo, false
 	}

@@ -15,9 +15,15 @@ test/acceptance/
 ├── images/       8 image-type acceptance tests (one *_test.go each)
 ├── validators/   external SBOM validators (cyclonedx-cli, pyspdxtools, bomctl)
 ├── scanners/     vuln scanners (grype, osv-scanner, trivy)
-└── runtimes/     5-runtime matrix (docker / buildkit / podman / buildah / kaniko)
+├── runtimes/     5-runtime matrix (docker / buildkit / podman / buildah / kaniko)
+└── sprint3/      Sprint 3 in-process suites — corporate / signing / gate
+    ├── helpers/       in-process fakes (proxy, npm mirror, mTLS, env)
+    ├── enrichment/    registry / lifecycle / CPE confidence quality gates
+    ├── corporate/     proxy / mirror replace+fallback / mTLS / air-gapped
+    ├── signing/       cosign sign+verify roundtrip, ErrTooling on missing binary
+    └── gate/          --fail-on=high blocks; --fail-on=critical passes
 
-test/benchmarks/  perf gates (1 GB / 5 GB / memory peak)
+test/benchmarks/  perf gates (1 GB / 5 GB / memory peak, plus Sprint 3 perf)
 ```
 
 ## Running locally
@@ -27,6 +33,14 @@ you already have:
 
 ```sh
 go test -tags acceptance -v -timeout 30m ./test/acceptance/images/...
+```
+
+The Sprint 3 in-process suites do NOT need docker — only `go build`
+and (for the signing roundtrip) the cosign binary on PATH. Run them
+in seconds:
+
+```sh
+go test -tags acceptance -v ./test/acceptance/sprint3/...
 ```
 
 Each test calls `helpers.RequireDockerDaemon` (and per-tool

@@ -4,6 +4,308 @@ All notable post-stage fixes that change observable behaviour. Stage
 deliverables themselves are tracked in the implementation log; this
 file is for cross-stage fixes that an operator might bisect against.
 
+## Unreleased — Sprint 3 (Real-World Enrichment)
+
+### Added
+
+- **Sprint 3 acceptance suite — in-process corporate scenarios**
+  (S3 Task 7). New `test/acceptance/sprint3/` tree exercising the
+  Sprint 3 features end-to-end without docker / syft / real
+  cosign. Run with
+  `go test -tags acceptance ./test/acceptance/sprint3/...` —
+  ~22 seconds on M-class arm64.
+
+  Coverage matrix:
+
+  - `enrichment/` (7 tests) — registry mirror writes Description /
+    Licenses / `astinus:registry:source`; lifecycle stamps
+    `astinus:lifecycle:status=eol` from the bundled snapshot for
+    Python 3.8 / Debian 10; `--no-network` and `--no-registry` /
+    `--no-lifecycle` flags fully suppress the corresponding
+    enrichers' outbound calls.
+  - `corporate/` (8 tests, 1 expected skip) — mirror `replace`
+    forbids fallback to the public registry even on 404; mirror
+    `fallback` traverses primary→secondary; mTLS handshake
+    succeeds with the configured client cert and silently skips
+    enrichment when the cert is missing; `--no-network` air-gapped
+    runs still complete with the bundled lifecycle snapshot;
+    bearer-token-from-env auth round-trips through the
+    `token_env` config.
+  - `signing/` (2 tests, 1 conditional skip) — missing cosign
+    binary surfaces `ExitSigning(50)` with a recovery hint; full
+    sign+verify roundtrip when `cosign` is on PATH (skipped
+    otherwise).
+  - `gate/` (2 tests) — `--fail-on=high` exits with the expected
+    code set on a no-license / no-CPE component;
+    `--fail-on=critical` against a fully-declared runtime SBOM
+    exits 0.
+
+  In-process fakes shipped in `test/acceptance/sprint3/helpers/`:
+  `FakeNpmMirror`, `FakeProxy`, `SpyServer`, `MTLSBundle`,
+  `MinimalOCIImage`, `WriteMirrorsConfig`. Astinus binary built
+  once per `go test` invocation and shared across every subtest.
+
+  Performance baseline: `test/benchmarks/sprint3_perf_test.go`
+  (build tag `benchmark`) — `BenchmarkRegistryEnrichment_LocalMirror`
+  + `BenchmarkLifecycleEnricher_BundledOnly`. ADR-0037.
+
+- **SBOM signing via Cosign** (S3 Task 6 — SLSA L2+ enabler).
+  New `internal/sign/` post-render stage that wraps the `cosign`
+  binary as a subprocess. Two modes: `cosign-key` (key-based) and
+  `cosign-keyless` (OIDC, with the token Cosign auto-detects from
+  CI env). Two output destinations: `--attach-to-image <ref>`
+  attaches an in-toto attestation to an OCI image; or
+  `--signature-output <path>` writes a detached signature blob.
+
+  Corporate Sigstore endpoints (private Rekor / Fulcio / TUF
+  mirror) flow through the env vars Cosign already understands —
+  CLI flags `--rekor-url` / `--fulcio-url` / `--tuf-mirror`
+  translate to `COSIGN_REKOR_URL` / `COSIGN_FULCIO_URL` /
+  `TUF_ROOT`. The existing `--ca-cert` flag (Stage 10) reaches
+  Cosign via `SSL_CERT_FILE`.
+
+  Sensitive args (key paths, tokens, certs) are redacted in the
+  `sign.cosign.start` log line so a verbose-debug session doesn't
+  leak operator material.
+
+  Subprocess approach (not `sigstore-go` library) chosen
+  deliberately — bundling sigstore-go would have grown the
+  Astinus binary from ~12 MiB to ~60 MiB. Operators install
+  Cosign separately (it's already on every CI runner). The wrapper
+  surfaces a clear `ErrTooling` ("install cosign") when the
+  binary isn't on PATH. ADR-0036.
+
+  CLI flags:
+  - `--sign-with cosign-key | cosign-keyless` (empty = signing off)
+  - `--signing-key <path>` — Cosign private key file.
+  - `--signing-key-password-env <var>` — env var holding the key
+    password (default `COSIGN_PASSWORD`).
+  - `--attach-to-image <ref>` OR `--signature-output <path>`
+    (mutually exclusive; one required).
+  - `--rekor-url`, `--fulcio-url`, `--tuf-mirror`,
+    `--cosign-path`.
+
+  New top-level subcommand `astinus verify` wraps
+  `cosign verify-blob` (detached signature + key) and
+  `cosign verify-attestation` (image-attached + OIDC identity
+  constraint). Same corporate-Sigstore flag set as the sign side
+  for round-trip verification.
+
+  New exit code `ExitSigning = 50` — non-fatal, the SBOM file
+  stays on disk so the operator can re-sign manually after
+  fixing the Cosign config.
+
+- **Lifecycle / EOL data enrichment** (S3 Task 5). New
+  `internal/enrich/lifecycle/` pipeline stage that maps OS /
+  runtime Components (Node, Python, Go, Java, Debian, Ubuntu,
+  Alpine, Postgres, MySQL, Redis, Kubernetes, Docker, …) to
+  endoflife.date products and stamps `astinus:lifecycle:*`
+  properties: product, cycle, release-date, active-support-end,
+  EOL, LTS, latest-release, status (active / maintenance / eol /
+  unknown), days-until-eol, source, fetched-at.
+
+  Two-tier Source chain (`--lifecycle-mode`): online-only,
+  offline-only (bundled embedded snapshot), or hybrid (default —
+  online first, bundled fallback). Embedded seed snapshot covers
+  ~12 popular products (3 KiB JSON); operators refresh richer
+  copies via `astinus lifecycle update --output <path>` and
+  point the enricher at the file via `--lifecycle-snapshot`.
+
+  Reuses the S3-Task-4 mirror plumbing (auth / mTLS / proxy /
+  per-mirror TLS) — entries with `ecosystem: lifecycle` in
+  `--mirrors-config` route to internal Artifactory / Nexus /
+  whatever-mirror operators run for endoflife.date in air-gapped
+  environments.
+
+  Operator-visible `WARN lifecycle.eol` log fires when an EOL
+  Component is matched (`status=eol`) so security teams see
+  unsupported software at scan time without parsing the SBOM.
+
+  ADR-0035.
+
+  CLI:
+  - `--no-lifecycle` — disable the entire stage.
+  - `--lifecycle-mode online | offline | hybrid` (default hybrid).
+  - `--lifecycle-snapshot <path>` — operator snapshot file
+    (overrides embedded).
+  - `astinus lifecycle update --output <path>` subcommand to
+    refresh the snapshot from endoflife.date (or a configured
+    mirror).
+
+- **Package-registry metadata enrichment** (S3 Task 4 — flagship
+  Sprint 3 feature). New pipeline stage
+  `internal/enrich/registry/` that fetches license / supplier /
+  homepage / repository / hashes / description / bug-tracker /
+  documentation from per-ecosystem package registries and projects
+  them onto each Component (fill-only — never overrides upstream
+  values). Per-ecosystem Source registry; PURL-routed dispatch;
+  layered cache (memory + on-disk JSON, sharded SHA path); negative-
+  result caching so re-runs on the same SBOM are free.
+
+  Implemented sources (full): npm, PyPI, Maven, golang.
+  Stub-registered sources (return ErrNotFound; full implementation
+  documented as ADR-0033 §6 follow-up): cargo, gem, nuget, deb, apk,
+  repology, ecosyste-ms.
+
+  Provenance: `astinus:registry:source` / `astinus:registry:fetched-at`
+  on every enriched Component, plus `astinus:registry:homepage` /
+  `:repository` / `:bug-tracker` / `:documentation` properties when
+  the registry yields URLs (the canonical model doesn't carry
+  CycloneDX externalReferences as typed fields — projection via
+  properties keeps round-trip clean).
+
+  ADR-0033 (architecture).
+
+- **Corporate mirror / auth / mTLS / proxy support** (S3 Task 4
+  companion). Every package-registry fetch flows through a
+  per-ecosystem mirror chain (`mode: replace` for air-gapped
+  default; `mode: fallback` for hybrid). Auth flavours: bearer,
+  basic, custom header (with the JFrog `X-JFrog-Art-Api` pattern
+  fully supported). Per-mirror TLS overrides include a corporate
+  CA bundle and mTLS client cert/key. Secrets read from env vars
+  at request time so the YAML never carries them. Proxy support
+  inherited from `http.DefaultTransport.Clone()` (honours
+  `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`). `--no-network` and
+  `--no-registry` provide complete opt-out paths.
+
+  ADR-0034.
+
+  CLI flags:
+  - `--no-registry` (default off) — disable the entire stage.
+  - `--mirrors-config <path>` — YAML with per-ecosystem mirror
+    + auth + TLS entries.
+  - `--registry-cache-dir <path>` — enable on-disk cache (default
+    memory-only).
+  - `--registry-cache-ttl <duration>` — cache entry TTL (default
+    7 days).
+
+  YAML schema: `internal/config/mirrors.go` (top-level `mirrors:`
+  key — distinct from the existing `registries:` key which targets
+  image-pull auth).
+
+- **Syft baseline noise prefilter** (S3 Task 3). New
+  `internal/enrich/syftprefilter/` enricher that runs FIRST in the
+  pipeline (Dependencies = nil) and applies the bundled
+  `pathclassifier` rules to Syft-supplied `type=file` Components,
+  dropping noise paths (`/etc/cron.d/...`, `/etc/apt/...`,
+  `/etc/pam.d/...`) and pruning orphaned edges from
+  `sbom.Relationships`. Reuses the same classifier the untracked
+  enricher uses (PRSD-Task-1 + operator overrides via
+  `--rules-file`), so a "skip" verdict for an untracked walk is
+  also a "skip" verdict for a Syft baseline row. Forensic
+  operators can disable the entire stage via
+  `--no-syft-prefilter`. Per the task acceptance metric, expected
+  reductions on the v0.2 reference image: total components 5800 →
+  ~2200-2500; type=file count 3992 → ~500; SBOM file size ~5MB →
+  ~1.5MB. ADR-0032.
+
+  CLI flag: `--no-syft-prefilter` (default off; filter on).
+
+### Changed
+
+- **Compliance severity policy per ecosystem** (S3 Task 2). The
+  Sprint 2 benchmark output had 11949 findings on 5800 components
+  — 200% — dominated by NTIA-SUPPLIER stamped at blanket
+  SeverityMedium for ecosystems where "supplier" is structurally
+  meaningless (npm packages, files, distro packages with derivable
+  supplier). Compliance teams reported they ignored the output
+  because the actionable-vs-noise ratio was too low.
+
+  Fix: a new per-ecosystem severity policy
+  (`internal/policy/builtin/compliance/severity_policy.go`)
+  classifies findings by RuleID + ComponentType + PURL ecosystem.
+  The compliance enricher applies the policy AFTER all validators
+  have emitted findings; SeverityIgnored findings (e.g. any rule on
+  a `type=file` Component) are dropped entirely from output and
+  counters. Operators can override the bundled defaults via
+  `--compliance-config <yaml>`. ADR-0031.
+
+  Output schema additions:
+  - `astinus:compliance:actionable-findings-count` — sum of
+    critical + high + medium (the set security teams should triage
+    first).
+  - `astinus:compliance:info-count` — informational findings (e.g.
+    npm NTIA-SUPPLIER) for transparency without noise.
+  - New `ignored` severity value: SeverityIgnored sorts below
+    SeverityInfo, never appears in output, never trips
+    `--fail-on`.
+
+  Behavior change for downstream consumers: the per-Component
+  `astinus:compliance:finding:NTIA-SUPPLIER` value is now
+  ecosystem-dependent (info / low / medium / high) instead of
+  always "medium". The `--fail-on` gate consumes post-policy
+  severities, so a `--fail-on medium` gate no longer trips on every
+  npm package missing a supplier field.
+
+### Added
+
+- `--compliance-config <path>` CLI flag — loads a YAML file with
+  `compliance.severity_overrides` entries that beat the bundled
+  per-ecosystem defaults. ADR-0031.
+
+### Fixed
+
+- **SubComponents extraction for binary components** (S3 Task 1).
+  The Sprint 2 benchmark output had no `subcomponents` and no
+  dependency edges for static Go binaries (yq, dive, etc.) even
+  though the multi-modal extractor registry was capable of
+  producing them — the extractor was wired only into the
+  untracked enricher's per-file walk, so binaries already
+  populated by the upstream SBOM (Syft tags `/usr/local/bin/yq`
+  with the file path in Evidence.Locations) silently skipped the
+  registry. The flagship "single binary scan recovers full module
+  graph" feature was effectively dead in production output.
+
+  Fix: a new `internal/enrich/extractor/` enricher runs after
+  `untracked` and projects extracted dependencies as top-level
+  `model.Component` entries (PURL-deduped across parents) plus
+  `RelationshipDependsOn` edges in `sbom.Relationships`. The
+  CycloneDX writer already serialises those edges as the canonical
+  `dependencies[].dependsOn` graph, so vulnerability scanners see
+  the embedded modules as first-class components.
+
+  Pipeline order: `attribution + basediff → untracked → extractor
+  → cpe → dedup → compliance` (encoded via `Dependencies()`
+  declarations + topological sort, regression-tested in
+  `extractor/order_test.go`). ADR-0030.
+
+### Added
+
+- **`internal/enrich/extractor` enricher** (S3 Task 1) — auto-
+  registered in production CLI; no operator-facing flag (the
+  feature is on by default and can only be disabled via
+  `--disable extractor`).
+
+### Fixed
+
+- **CPE confidence handling and false-positive rejection** (S3 Task 0).
+  The Sprint 2 benchmark output for `yq` carried three `astinus:cpe:N`
+  properties — a Linksys router CPE, a German auction-site CPE, and
+  the legitimate `yq:v4` entry — all stamped with a single blanket
+  `astinus:cpe:confidence=high`. Vulnerability scanners reading the
+  enriched SBOM raised CVEs against unrelated hardware, breaking the
+  security workflow. Fix: per-Candidate confidence scoring,
+  Threshold-based classification (primary / alternative / rejected),
+  hard rejection of hardware-type CPEs (`type=h`) on software PURLs,
+  per-attribute MatchDetails, and a new output schema:
+  - primary CPE → CycloneDX `cpe` field
+  - alternatives ≥ 0.50 → `astinus:cpe:alternative:N` properties
+  - rejected → DEBUG log only (or `astinus:cpe:rejected:N` with
+    `--include-rejected-cpe`)
+
+  Confidence stamps changed from string labels (`"high"` / `"low"`)
+  to numeric format (`"0.95"` / `"0.50"`); SARIF and summary
+  renderers parse both for backward compatibility. The deprecated
+  `astinus:cpe:N` numbered property is no longer emitted by
+  Astinus (still understood on read for v0.2 SBOM round-trip).
+  ADR-0029.
+
+### Added
+
+- `--include-rejected-cpe` CLI flag emits `astinus:cpe:rejected:N`
+  properties for diagnostic inspection. Default off; rejected
+  candidates always appear in the DEBUG `cpe.rejected` log.
+
 ## v0.2.0 — 2026-05-03 (Production Readiness Sprint)
 
 The Production Readiness Sprint (PRSD-Task-0..9) closes Track A

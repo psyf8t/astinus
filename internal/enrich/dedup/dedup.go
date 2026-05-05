@@ -44,9 +44,14 @@ func (*Enricher) Name() string { return Name }
 // Dependencies implements enrich.Enricher. PRSD-Task-6: dedup is
 // the finalize stage — it MUST run AFTER basediff (which sets
 // Origin) and AFTER cpe (which adds CPEs that participate in the
-// dedup key). Declaring both deps lets `TopoSort` place dedup
-// last regardless of input order.
-func (*Enricher) Dependencies() []string { return []string{"basediff", "cpe"} }
+// dedup key). S3 Task 1 adds "extractor" so the lifted
+// embedded-dependency components also feed the dedup key. S3
+// Task 4 adds "registry" so registry-derived hashes / supplier /
+// licenses participate too. `TopoSort` places dedup last regardless
+// of input order.
+func (*Enricher) Dependencies() []string {
+	return []string{"basediff", "cpe", "extractor", "registry"}
+}
 
 // Enrich implements enrich.Enricher. The bundle is unused; dedup
 // works purely on the in-memory SBOM.

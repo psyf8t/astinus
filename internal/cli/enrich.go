@@ -21,6 +21,11 @@ import (
 	"github.com/psyf8t/astinus/internal/enrich/cpe"
 	cpesources "github.com/psyf8t/astinus/internal/enrich/cpe/sources"
 	"github.com/psyf8t/astinus/internal/enrich/dedup"
+	enrichextractor "github.com/psyf8t/astinus/internal/enrich/extractor"
+	"github.com/psyf8t/astinus/internal/enrich/lifecycle"
+	registryenrich "github.com/psyf8t/astinus/internal/enrich/registry"
+	registrysources "github.com/psyf8t/astinus/internal/enrich/registry/sources"
+	"github.com/psyf8t/astinus/internal/enrich/syftprefilter"
 	"github.com/psyf8t/astinus/internal/enrich/untracked"
 	"github.com/psyf8t/astinus/internal/enrich/untracked/pathclassifier"
 	"github.com/psyf8t/astinus/internal/fingerprint/matcher"
@@ -30,10 +35,12 @@ import (
 	"github.com/psyf8t/astinus/internal/image/transport"
 	"github.com/psyf8t/astinus/internal/output"
 	"github.com/psyf8t/astinus/internal/policy"
+	compliancepolicy "github.com/psyf8t/astinus/internal/policy/builtin/compliance"
 	sbompkg "github.com/psyf8t/astinus/internal/sbom"
 	"github.com/psyf8t/astinus/internal/sbom/cyclonedx"
 	"github.com/psyf8t/astinus/internal/sbom/model"
 	"github.com/psyf8t/astinus/internal/sbom/spdx"
+	"github.com/psyf8t/astinus/internal/sign"
 	"github.com/psyf8t/astinus/internal/telemetry"
 )
 
@@ -51,6 +58,12 @@ const (
 	// floor and at least one compliance finding meets that floor.
 	// PRSD-Task-7.
 	ExitComplianceFail = 40
+	// ExitSigning is emitted when `--sign-with` was set but the
+	// signing step failed (cosign missing, key invalid, signing
+	// returned non-zero, etc.). Non-fatal: the SBOM file is still
+	// written before signing runs, so the operator keeps the
+	// artefact. S3 Task 6.
+	ExitSigning = 50
 )
 
 // enrichOptions are bound to flags by newEnrichCommand.
@@ -92,6 +105,72 @@ type enrichOptions struct {
 	// nvdAPIKey is the NVD API key (env: NVD_API_KEY).
 	// PRSD-Task-5.
 	nvdAPIKey string
+	// includeRejectedCPE makes the cpe enricher emit
+	// `astinus:cpe:rejected:N` properties for candidates that
+	// scored below the alternative-min threshold (debug surface).
+	// Default false; rejected candidates always land in the debug
+	// log regardless. S3 Task 0 / ADR-0029.
+	includeRejectedCPE bool
+	// complianceConfig is an optional YAML file with severity
+	// overrides for the compliance enricher's per-ecosystem
+	// SeverityPolicy (S3 Task 2 / ADR-0031). Empty path = bundled
+	// defaults only.
+	complianceConfig string
+	// noSyftPrefilter disables the pre-pipeline syftprefilter
+	// stage. Default false (filter on). Forensic-mode operators
+	// who need every Syft `type=file` Component preserved set
+	// this to true. S3 Task 3 / ADR-0032.
+	noSyftPrefilter bool
+	// noRegistry disables the package-registry enrichment stage.
+	// Default false (enrichment on; honoured per --no-network and
+	// per-source NetworkOK). S3 Task 4 / ADR-0033.
+	noRegistry bool
+	// mirrorsConfig is an optional YAML file with package-registry
+	// mirror config (npm/PyPI/Maven/etc.). Empty path = no
+	// mirrors, fall through to public upstreams.
+	mirrorsConfig string
+	// registryCacheDir enables a layered (memory + on-disk) cache
+	// for registry metadata. Empty path = memory-only.
+	registryCacheDir string
+	// registryCacheTTL is the per-entry TTL for the disk cache.
+	// 0 disables expiry.
+	registryCacheTTL time.Duration
+	// noLifecycle disables the lifecycle / EOL enrichment stage.
+	// Default off (enrichment on). S3 Task 5 / ADR-0035.
+	noLifecycle bool
+	// lifecycleMode is online | offline | hybrid (default).
+	// Hybrid tries endoflife.date first, falls back to bundled.
+	// `--no-network` overrides to offline.
+	lifecycleMode string
+	// lifecycleSnapshot points at an operator-supplied JSON
+	// snapshot file (refreshed via `astinus lifecycle update`).
+	// Empty path uses the embedded seed snapshot.
+	lifecycleSnapshot string
+	// signWith selects the signing flow: "" (off, default) /
+	// "cosign-key" / "cosign-keyless". S3 Task 6 / ADR-0036.
+	signWith string
+	// signingKey is the Cosign private-key path (cosign-key
+	// mode).
+	signingKey string
+	// signingKeyPasswordEnv is the env var holding the key's
+	// password. Default `COSIGN_PASSWORD` (cosign's own
+	// convention).
+	signingKeyPasswordEnv string
+	// attachToImage is the OCI ref to attach the in-toto
+	// attestation to (e.g. `myorg/img:v1`). Empty = produce a
+	// detached signature only.
+	attachToImage string
+	// signatureOutput is the path where cosign writes the
+	// detached signature (sign-blob mode).
+	signatureOutput string
+	// rekorURL / fulcioURL / tufMirror are the corporate
+	// Sigstore overrides. Empty = use Sigstore public.
+	rekorURL  string
+	fulcioURL string
+	tufMirror string
+	// cosignPath overrides the `cosign` lookup. Useful for
+	// custom installs and for the test harness.
+	cosignPath string
 	// failOn is the compliance-finding severity gate. Empty
 	// means "never fail on compliance findings"; non-empty
 	// values are one of `critical`, `high`, `medium`, `low`,
@@ -168,6 +247,78 @@ add the others.`,
 		"CPE resolver mode: online | offline | hybrid (default hybrid)")
 	flags.StringVar(&opts.nvdAPIKey, "nvd-api-key", "",
 		"NVD API key (env: NVD_API_KEY). Higher rate limit (50 req / 30s vs 5 req / 30s)")
+	flags.BoolVar(&opts.includeRejectedCPE, "include-rejected-cpe", false,
+		"Emit astinus:cpe:rejected:N properties for CPE candidates "+
+			"that failed the confidence threshold (debug; default off — "+
+			"rejected candidates always appear in the cpe.rejected debug log).")
+	flags.StringVar(&opts.complianceConfig, "compliance-config", "",
+		"Path to a YAML file with compliance severity overrides "+
+			"(per ecosystem / component_type). Default: bundled per-ecosystem "+
+			"policy. See ADR-0031 for the schema.")
+	flags.BoolVar(&opts.noSyftPrefilter, "no-syft-prefilter", false,
+		"Disable Syft baseline noise filtering. Keep every type=file "+
+			"Component the upstream SBOM produced (forensic mode; the "+
+			"default filter drops /etc/cron.d/, /etc/apt/, /etc/pam.d/ "+
+			"noise via the bundled path-classifier rules). See ADR-0032.")
+	flags.BoolVar(&opts.noRegistry, "no-registry", false,
+		"Disable package-registry enrichment. Default off — Astinus "+
+			"fetches license / supplier / homepage / repository / hashes "+
+			"from npm / PyPI / Maven / Go module proxy (and stub-registered "+
+			"cargo / gem / nuget / deb / apk / repology / ecosyste-ms; "+
+			"see ADR-0033 §6 for the deferred-source list).")
+	flags.StringVar(&opts.mirrorsConfig, "mirrors-config", "",
+		"Path to a YAML file with package-registry mirror config "+
+			"(per-ecosystem mirror URL + auth + TLS). Default: no "+
+			"mirrors, fall through to public upstreams. See ADR-0034 "+
+			"for the schema.")
+	flags.StringVar(&opts.registryCacheDir, "registry-cache-dir", "",
+		"Directory for the registry-metadata disk cache. Default "+
+			"memory-only (per-process). Set to enable a layered cache "+
+			"that survives restarts.")
+	flags.DurationVar(&opts.registryCacheTTL, "registry-cache-ttl",
+		7*24*time.Hour,
+		"Per-entry TTL for the registry-cache-dir cache. 0 disables "+
+			"expiry. Default 7 days (NPM/PyPI/Maven entries change rarely "+
+			"once published).")
+	flags.BoolVar(&opts.noLifecycle, "no-lifecycle", false,
+		"Disable lifecycle / EOL enrichment. Default off — Astinus "+
+			"stamps astinus:lifecycle:* properties on OS / runtime "+
+			"Components (Node, Python, Go, Java, Debian, Ubuntu, "+
+			"Alpine, Postgres, MySQL, Redis, Kubernetes, Docker, …) "+
+			"from endoflife.date data plus a bundled offline snapshot. "+
+			"See ADR-0035.")
+	flags.StringVar(&opts.lifecycleMode, "lifecycle-mode", "hybrid",
+		"Lifecycle resolver mode: online | offline | hybrid (default "+
+			"hybrid — endoflife.date first, bundled fallback). "+
+			"`--no-network` overrides to offline.")
+	flags.StringVar(&opts.lifecycleSnapshot, "lifecycle-snapshot", "",
+		"Path to a custom endoflife.date snapshot JSON file (overrides "+
+			"the embedded seed). Refresh via `astinus lifecycle update`.")
+	flags.StringVar(&opts.signWith, "sign-with", "",
+		"Sign the rendered SBOM. Values: cosign-key | cosign-keyless. "+
+			"Empty (default) disables signing. Wraps the cosign "+
+			"subprocess — install cosign to use. See ADR-0036.")
+	flags.StringVar(&opts.signingKey, "signing-key", "",
+		"Path to a Cosign private key (cosign-key mode).")
+	flags.StringVar(&opts.signingKeyPasswordEnv, "signing-key-password-env",
+		"COSIGN_PASSWORD",
+		"Env var holding the cosign private-key password. Default "+
+			"COSIGN_PASSWORD (cosign's own convention).")
+	flags.StringVar(&opts.attachToImage, "attach-to-image", "",
+		"Attach the in-toto attestation to this OCI image reference "+
+			"(e.g. ghcr.io/org/img:v1). Empty = detached signature only.")
+	flags.StringVar(&opts.signatureOutput, "signature-output", "",
+		"Path to write the detached cosign signature (sign-blob mode). "+
+			"Required when --attach-to-image is empty.")
+	flags.StringVar(&opts.rekorURL, "rekor-url", "",
+		"Corporate Rekor transparency-log URL. Empty = Sigstore public.")
+	flags.StringVar(&opts.fulcioURL, "fulcio-url", "",
+		"Corporate Fulcio CA URL. Empty = Sigstore public.")
+	flags.StringVar(&opts.tufMirror, "tuf-mirror", "",
+		"TUF root mirror URL for air-gapped Sigstore. Empty = Sigstore "+
+			"public.")
+	flags.StringVar(&opts.cosignPath, "cosign-path", "",
+		"Override the cosign binary lookup (default: PATH).")
 	flags.StringVar(&opts.failOn, "fail-on", "",
 		"Exit non-zero when any compliance finding meets this severity: critical | high | medium | low | info (default: never fail)")
 	flags.StringVar(&opts.metricsOutput, "metrics-output", "",
@@ -292,15 +443,84 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 		"output", opts.outputPath,
 		"format", formatName,
 	)
+	return runPostRenderHooks(ctx, opts, sbom, logger, formatName)
+}
 
-	// ── Step 5: --fail-on compliance gate ─────────────────────────
-	// Evaluated AFTER the SBOM is rendered so operators always
-	// keep the artefact even when the gate trips. The gate's
-	// non-zero exit signals "produced but failed compliance".
-	// PRSD-Task-7.
+// runPostRenderHooks fires the operator-visible side effects that
+// must happen AFTER the SBOM file is on disk: optional Cosign
+// signing (S3 Task 6) and the `--fail-on` compliance gate
+// (PRSD-Task-7). Both produce non-zero exit codes; both leave the
+// SBOM artefact in place.
+func runPostRenderHooks(ctx context.Context, opts *enrichOptions, sbom *model.SBOM, logger *slog.Logger, formatName string) error {
+	if exitErr := runSigningStep(ctx, opts, logger, formatName); exitErr != nil {
+		return exitErr
+	}
 	if exitErr := evaluateComplianceGate(ctx, opts, sbom, logger); exitErr != nil {
 		return exitErr
 	}
+	return nil
+}
+
+// runSigningStep runs cosign over the rendered SBOM file when
+// `--sign-with` is set. No-op for the default empty value. Errors
+// (cosign missing, key invalid, signing returned non-zero) are
+// surfaced as ExitSigning with the underlying error preserved —
+// operators see exactly what cosign complained about.
+//
+// Refuses to sign when output went to stdout (`--output -`) — the
+// signature MUST cover the byte content the operator hands
+// downstream, and stdout has already been flushed by the time we
+// get here.
+func runSigningStep(ctx context.Context, opts *enrichOptions, logger *slog.Logger, formatName string) *exitError {
+	mode := sign.Mode(opts.signWith)
+	if mode == sign.ModeNone {
+		return nil
+	}
+	if !mode.IsKnown() {
+		return newExitError(ExitInvalidArgs,
+			fmt.Errorf("--sign-with: unknown mode %q (want cosign-key | cosign-keyless)", opts.signWith))
+	}
+	if opts.outputPath == "-" || opts.outputPath == "" {
+		return newExitError(ExitInvalidArgs,
+			fmt.Errorf("--sign-with requires a real --output path (cannot sign stdout)"))
+	}
+	body, err := os.ReadFile(opts.outputPath) //nolint:gosec // operator-supplied output path
+	if err != nil {
+		return newExitError(ExitOutputWrite,
+			fmt.Errorf("read SBOM for signing: %w", err))
+	}
+	signOpts := sign.SignOptions{
+		Format:         formatName,
+		AttachToImage:  opts.attachToImage,
+		OutputFile:     opts.signatureOutput,
+		KeyPath:        opts.signingKey,
+		KeyPasswordEnv: opts.signingKeyPasswordEnv,
+		RekorURL:       opts.rekorURL,
+		FulcioURL:      opts.fulcioURL,
+		TUFMirror:      opts.tufMirror,
+		CABundle:       opts.caBundle,
+	}
+	if err := signOpts.Validate(mode); err != nil {
+		return newExitError(ExitInvalidArgs, err)
+	}
+	signer, err := sign.NewCosignSigner(sign.CosignOptions{
+		CosignPath: opts.cosignPath,
+		Logger:     logger,
+	})
+	if err != nil {
+		return newExitError(ExitSigning, err)
+	}
+	artifact, err := signer.Sign(ctx, body, signOpts)
+	if err != nil {
+		return newExitError(ExitSigning, err)
+	}
+	logger.Info("sign.complete",
+		"signer", signer.Name(),
+		"format", artifact.Format,
+		"oci_ref", artifact.OCIReference,
+		"output_file", opts.signatureOutput,
+		"predicate_uri", artifact.PredicateURI,
+		"signed_at", artifact.SignedAt.Format(time.RFC3339))
 	return nil
 }
 
@@ -537,10 +757,63 @@ func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.
 		return nil, err
 	}
 
+	severityPolicy, err := compliancepolicy.LoadSeverityPolicyFromFile(opts.complianceConfig)
+	if err != nil {
+		return nil, err
+	}
+	complianceEnricher := compliance.New().WithSeverityPolicy(severityPolicy)
+
+	// S3 Task 3: pre-pipeline noise filter for Syft `type=file`
+	// Components. Reuses the same path-classifier the untracked
+	// enricher uses (PRSD-Task-1 + operator overrides via
+	// --rules-file when set), so a path that's "skip" for an
+	// untracked walk is also "skip" for a Syft baseline row.
+	// Disabled via --no-syft-prefilter for forensic mode.
+	prefilterEnricher := syftprefilter.New(nil)
+	if !opts.noSyftPrefilter {
+		prefilterEnricher = syftprefilter.New(classifier)
+	}
+
+	// S3 Task 4: package-registry enrichment. Disabled with
+	// `--no-registry`; honors `--no-network` per-source via
+	// RequiresNetwork(). Mirror config loaded from YAML if given.
+	registryEnricher, err := buildRegistryEnricher(opts, tr, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	// S3 Task 5: lifecycle / EOL enrichment. Disabled with
+	// `--no-lifecycle`. Mode online / offline / hybrid via
+	// `--lifecycle-mode`; `--no-network` forces offline. Mirrors
+	// reuse the same `mirrors:` YAML schema (ecosystem=lifecycle).
+	lifecycleEnricher, err := buildLifecycleEnricher(opts, tr, logger)
+	if err != nil {
+		return nil, err
+	}
+
 	return []enrich.Enricher{
+		prefilterEnricher,
 		attribution.New(),
 		basediff.NewWithOptions(basediffOptionsFor(opts, sourceOpts)),
 		untrackedEnricher,
+		// extractor lifts embedded module / crate / package
+		// dependencies out of binary components into top-level
+		// components + RelationshipDependsOn edges. Runs after
+		// untracked (so untracked-discovered binaries are part of
+		// the slate) and before cpe / dedup (so the lifted entries
+		// pick up CPEs and feed the dedup key). S3 Task 1 / ADR-0030.
+		enrichextractor.New(),
+		// registry enricher fills supplier / license / homepage /
+		// repository / hashes from npm / PyPI / Maven / Go module
+		// proxy. Runs after extractor (so lifted top-level deps get
+		// their license/supplier from upstream) and before cpe /
+		// dedup. S3 Task 4 / ADR-0033.
+		registryEnricher,
+		// lifecycle enricher stamps astinus:lifecycle:* properties
+		// on OS / runtime Components from endoflife.date. Same
+		// pipeline tier as registry — deps on untracked + extractor
+		// only (independent of cpe / dedup). S3 Task 5 / ADR-0035.
+		lifecycleEnricher,
 		cpeEnricher,
 		// dedup is the finalize stage — runs LAST so PURLs / CPEs
 		// added by upstream enrichers participate in the dedup key.
@@ -549,8 +822,10 @@ func allEnrichers(ctx context.Context, opts *enrichOptions, sourceOpts []source.
 		// compliance runs AFTER dedup (PRSD-Task-6 deps =
 		// ["dedup"]) so validators see the post-dedup SBOM with
 		// every PURL / CPE / Origin already stamped.
-		// PRSD-Task-7.
-		compliance.New(),
+		// PRSD-Task-7. S3 Task 2: optionally configured with a
+		// per-ecosystem severity override file via
+		// `--compliance-config`.
+		complianceEnricher,
 	}, nil
 }
 
@@ -737,8 +1012,143 @@ func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Lo
 		"mode", string(mode),
 		"sources", len(resolver.Sources()),
 		"nvd_authenticated", opts.nvdAPIKey != "" || os.Getenv("NVD_API_KEY") != "",
-		"nvd_skipped", nvdSkipped)
-	return cpe.NewWithResolver(resolver), nil
+		"nvd_skipped", nvdSkipped,
+		"include_rejected", opts.includeRejectedCPE)
+	return cpe.NewWithResolver(resolver).WithIncludeRejected(opts.includeRejectedCPE), nil
+}
+
+// buildRegistryEnricher composes the S3-Task-4 registry enricher
+// per CLI flags. When --no-registry is set, returns an enricher
+// with a nil resolver (no-op Enrich). Otherwise loads the mirror
+// YAML, indexes mirrors per ecosystem, instantiates the 4 fully
+// implemented sources (npm, pypi, maven, golang) plus the 5 stubs
+// (cargo, gem, nuget, deb, alpine) and 2 aggregator stubs
+// (repology, ecosyste-ms), wires the (optional) layered cache, and
+// returns the enricher. ADR-0033.
+func buildRegistryEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Logger) (*registryenrich.Enricher, error) {
+	if opts.noRegistry {
+		return registryenrich.New(nil).WithLogger(logger), nil
+	}
+	mirrorsCfg, err := cfgpkg.LoadMirrorsConfig(opts.mirrorsConfig)
+	if err != nil {
+		return nil, err
+	}
+	byEco := registryenrich.MirrorsByEcosystem(mirrorsCfg)
+
+	httpClient := &http.Client{Transport: tr, Timeout: 30 * time.Second}
+
+	sources := []registryenrich.Source{
+		registrysources.NewNPM(byEco["npm"], httpClient),
+		registrysources.NewPyPI(byEco["pypi"], httpClient),
+		registrysources.NewMaven(byEco["maven"], httpClient),
+		registrysources.NewGolang(byEco["golang"], httpClient),
+		registrysources.NewCargo(byEco["cargo"], httpClient),
+		registrysources.NewRubyGems(byEco["gem"], httpClient),
+		registrysources.NewNuGet(byEco["nuget"], httpClient),
+		registrysources.NewDebian(byEco["deb"], httpClient),
+		registrysources.NewAlpine(byEco["apk"], httpClient),
+		registrysources.NewRepology(byEco["repology"], httpClient),
+		registrysources.NewEcosystems(byEco["ecosyste-ms"], httpClient),
+	}
+
+	cache, err := buildRegistryCache(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	resolver := registryenrich.NewResolver(registryenrich.ResolverOptions{
+		Sources:   sources,
+		Cache:     cache,
+		NetworkOK: !opts.noNetwork,
+		Logger:    logger,
+	})
+	logger.Info("registry.configured",
+		"sources", len(sources),
+		"network_ok", !opts.noNetwork,
+		"mirrors_total", len(mirrorsCfg.Mirrors),
+		"cache_dir", opts.registryCacheDir,
+		"cache_ttl", opts.registryCacheTTL.String())
+	return registryenrich.New(resolver).WithLogger(logger), nil
+}
+
+// buildLifecycleEnricher composes the S3-Task-5 lifecycle enricher.
+// `--no-lifecycle` returns a disabled enricher (no-op Enrich).
+// Otherwise picks the Source slate per `--lifecycle-mode` +
+// `--no-network`, loading the operator-supplied snapshot file when
+// `--lifecycle-snapshot` is set (else the embedded seed).
+//
+// Lifecycle mirrors are read from the same `mirrors:` YAML
+// (ecosystem=lifecycle) so corp ops don't manage two configs.
+// ADR-0035.
+func buildLifecycleEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Logger) (*lifecycle.Enricher, error) {
+	if opts.noLifecycle {
+		return lifecycle.New(nil).WithLogger(logger), nil
+	}
+	mode := lifecycle.Mode(strings.ToLower(strings.TrimSpace(opts.lifecycleMode)))
+	if !mode.IsKnown() {
+		mode = lifecycle.ModeHybrid
+	}
+	if opts.noNetwork {
+		mode = lifecycle.ModeOffline
+	}
+
+	bundled, err := loadLifecycleBundled(opts.lifecycleSnapshot)
+	if err != nil {
+		return nil, err
+	}
+
+	mirrorsCfg, err := cfgpkg.LoadMirrorsConfig(opts.mirrorsConfig)
+	if err != nil {
+		return nil, err
+	}
+	mirrors := registryenrich.MirrorsByEcosystem(mirrorsCfg)["lifecycle"]
+	httpClient := &http.Client{Transport: tr, Timeout: 30 * time.Second}
+	online := lifecycle.NewEndOfLife(mirrors, httpClient).WithLogger(logger)
+
+	resolver := lifecycle.NewResolver(lifecycle.ResolverOptions{
+		Online:  online,
+		Bundled: bundled,
+		Mode:    mode,
+		Logger:  logger,
+	})
+	logger.Info("lifecycle.configured",
+		"mode", string(mode),
+		"snapshot", lifecycleSnapshotLabel(opts.lifecycleSnapshot),
+		"bundled_products", bundled.ProductCount(),
+		"mirrors", len(mirrors))
+	return lifecycle.New(resolver).WithLogger(logger), nil
+}
+
+// loadLifecycleBundled returns the BundledSource per the operator's
+// `--lifecycle-snapshot` choice. Empty path = embedded seed.
+func loadLifecycleBundled(path string) (*lifecycle.BundledSource, error) {
+	if path == "" {
+		return lifecycle.LoadBundled()
+	}
+	return lifecycle.LoadBundledFromFile(path)
+}
+
+// lifecycleSnapshotLabel renders the snapshot source for the
+// `lifecycle.configured` log line.
+func lifecycleSnapshotLabel(path string) string {
+	if path == "" {
+		return "embedded"
+	}
+	return path
+}
+
+// buildRegistryCache returns the cache implementation per CLI
+// flags. Empty --registry-cache-dir → MemoryCache only.
+func buildRegistryCache(opts *enrichOptions) (registryenrich.Cache, error) {
+	mem := registryenrich.NewMemoryCache()
+	if opts.registryCacheDir == "" {
+		return mem, nil
+	}
+	disk, err := registryenrich.NewDiskCache(opts.registryCacheDir, opts.registryCacheTTL)
+	if err != nil {
+		return nil, err
+	}
+	return registryenrich.NewLayeredCache(mem, disk), nil
 }
 
 // buildPathClassifier loads the bundled default rules and (when

@@ -52,8 +52,8 @@ func TestHeuristicAlwaysFires(t *testing.T) {
 	if len(out) == 0 {
 		t.Fatal("heuristic should always emit at least one match")
 	}
-	if out[0].Confidence != cpe.ConfidenceLow {
-		t.Errorf("Confidence = %q, want low", out[0].Confidence)
+	if out[0].Confidence != cpe.ConfidenceMedium {
+		t.Errorf("Confidence = %v, want %v", out[0].Confidence, cpe.ConfidenceMedium)
 	}
 }
 

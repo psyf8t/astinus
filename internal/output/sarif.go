@@ -223,7 +223,7 @@ func resultsForComponent(c *model.Component) []sarifResult {
 			Locations: locationsFor(c),
 		})
 	}
-	if c.Properties != nil && c.Properties["astinus:cpe:confidence"] == "low" {
+	if c.Properties != nil && isLowConfidenceCPE(c.Properties["astinus:cpe:confidence"]) {
 		out = append(out, sarifResult{
 			RuleID:    ruleLowConfidenceCPE,
 			Level:     "note",
@@ -306,6 +306,39 @@ func locationsFor(c *model.Component) []sarifLocation {
 // as a workspace-relative path (GitHub Code Scanning expects that).
 func cleanURI(p string) string {
 	return strings.TrimPrefix(p, "/")
+}
+
+// isLowConfidenceCPE reports whether the `astinus:cpe:confidence`
+// stamp signals a low-confidence (heuristic) primary CPE. Sprint 3
+// Task 0 changed the stamp from a coarse string label ("low" / "high")
+// to a numeric "0.50" / "0.95"; the helper accepts either form so
+// previously-enriched SBOMs still light up the SARIF rule.
+func isLowConfidenceCPE(stamp string) bool {
+	if stamp == "" {
+		return false
+	}
+	if stamp == "low" {
+		return true
+	}
+	v, err := parseConfidence(stamp)
+	if err != nil {
+		return false
+	}
+	// Match Threshold.AlternativeMin: anything strictly above the
+	// alternative floor reads as "good enough" — i.e. the rule fires
+	// on candidates that just squeak through.
+	return v < 0.70
+}
+
+// parseConfidence reads the "%.2f" format the cpe enricher writes.
+// Returns (value, nil) on success, (0, err) on a parse failure so
+// callers can decide whether to fall back to the legacy label.
+func parseConfidence(s string) (float64, error) {
+	var v float64
+	if _, err := fmt.Sscanf(s, "%f", &v); err != nil {
+		return 0, err
+	}
+	return v, nil
 }
 
 // walkComponents recurses depth-first into SubComponents.

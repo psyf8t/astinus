@@ -1,0 +1,72 @@
+{
+  "_": "Astinus bundled lifecycle seed snapshot — small, hand-curated subset of the endoflife.date catalogue covering the most common OS / runtime Components in real container SBOMs. Operators refresh richer copies via `astinus lifecycle update`. The schema is the wire format (eolCycle) so this file's contents are byte-identical to what endoflife.date serves at /<product>.json — no transformation step at snapshot-author time. Per-product cycles snapshotted on 2026-05-04. See ADR-0035.",
+  "nodejs": [
+    {"cycle": "22", "releaseDate": "2024-04-24", "support": "2025-10-21", "eol": "2027-04-30", "latest": "22.10.0", "lts": true},
+    {"cycle": "20", "releaseDate": "2023-04-18", "support": "2024-10-22", "eol": "2026-04-30", "latest": "20.18.0", "lts": true},
+    {"cycle": "18", "releaseDate": "2022-04-19", "support": "2023-10-18", "eol": "2025-04-30", "latest": "18.20.4", "lts": true},
+    {"cycle": "16", "releaseDate": "2021-04-20", "support": "2022-10-18", "eol": "2023-09-11", "latest": "16.20.2", "lts": true}
+  ],
+  "python": [
+    {"cycle": "3.13", "releaseDate": "2024-10-07", "support": "2026-05-01", "eol": "2029-10-01", "latest": "3.13.0", "lts": false},
+    {"cycle": "3.12", "releaseDate": "2023-10-02", "support": "2025-05-01", "eol": "2028-10-01", "latest": "3.12.7", "lts": false},
+    {"cycle": "3.11", "releaseDate": "2022-10-24", "support": "2024-04-02", "eol": "2027-10-01", "latest": "3.11.10", "lts": false},
+    {"cycle": "3.10", "releaseDate": "2021-10-04", "support": "2023-04-05", "eol": "2026-10-01", "latest": "3.10.15", "lts": false},
+    {"cycle": "3.9",  "releaseDate": "2020-10-05", "support": "2022-05-17", "eol": "2025-10-01", "latest": "3.9.20",  "lts": false},
+    {"cycle": "3.8",  "releaseDate": "2019-10-14", "support": "2021-05-03", "eol": "2024-10-01", "latest": "3.8.20",  "lts": false}
+  ],
+  "go": [
+    {"cycle": "1.23", "releaseDate": "2024-08-13", "support": "2025-08-01", "eol": "2026-02-01", "latest": "1.23.2",  "lts": false},
+    {"cycle": "1.22", "releaseDate": "2024-02-06", "support": "2025-02-01", "eol": "2025-08-01", "latest": "1.22.8",  "lts": false},
+    {"cycle": "1.21", "releaseDate": "2023-08-08", "support": "2024-08-01", "eol": "2025-02-01", "latest": "1.21.13", "lts": false}
+  ],
+  "openjdk": [
+    {"cycle": "23", "releaseDate": "2024-09-17", "support": "2025-03-01", "eol": "2025-03-01", "latest": "23.0.0",   "lts": false},
+    {"cycle": "21", "releaseDate": "2023-09-19", "support": "2028-09-01", "eol": "2031-09-01", "latest": "21.0.5",   "lts": true},
+    {"cycle": "17", "releaseDate": "2021-09-14", "support": "2026-09-01", "eol": "2029-09-01", "latest": "17.0.13",  "lts": true},
+    {"cycle": "11", "releaseDate": "2018-09-25", "support": "2023-09-01", "eol": "2026-09-01", "latest": "11.0.25",  "lts": true},
+    {"cycle": "8",  "releaseDate": "2014-03-18", "support": "2022-03-31", "eol": "2030-12-01", "latest": "8u432",    "lts": true}
+  ],
+  "debian": [
+    {"cycle": "12", "releaseDate": "2023-06-10", "support": "2026-06-10", "eol": "2028-06-10", "latest": "12.7",  "lts": false},
+    {"cycle": "11", "releaseDate": "2021-08-14", "support": "2024-07-31", "eol": "2026-06-30", "latest": "11.11", "lts": false},
+    {"cycle": "10", "releaseDate": "2019-07-06", "support": "2022-08-14", "eol": "2024-06-30", "latest": "10.13", "lts": false}
+  ],
+  "ubuntu": [
+    {"cycle": "24.04", "releaseDate": "2024-04-25", "support": "2029-05-31", "eol": "2034-04-25", "latest": "24.04.1", "lts": true},
+    {"cycle": "22.04", "releaseDate": "2022-04-21", "support": "2027-04-01", "eol": "2032-04-09", "latest": "22.04.5", "lts": true},
+    {"cycle": "20.04", "releaseDate": "2020-04-23", "support": "2025-04-02", "eol": "2030-04-02", "latest": "20.04.6", "lts": true},
+    {"cycle": "18.04", "releaseDate": "2018-04-26", "support": "2023-05-31", "eol": "2028-04-26", "latest": "18.04.6", "lts": true}
+  ],
+  "alpine": [
+    {"cycle": "3.20", "releaseDate": "2024-05-22", "eol": "2026-05-01", "latest": "3.20.3",  "lts": false},
+    {"cycle": "3.19", "releaseDate": "2023-12-07", "eol": "2025-11-01", "latest": "3.19.4",  "lts": false},
+    {"cycle": "3.18", "releaseDate": "2023-05-09", "eol": "2025-05-09", "latest": "3.18.9",  "lts": false},
+    {"cycle": "3.17", "releaseDate": "2022-11-22", "eol": "2024-11-22", "latest": "3.17.10", "lts": false}
+  ],
+  "postgresql": [
+    {"cycle": "17", "releaseDate": "2024-09-26", "eol": "2029-11-08", "latest": "17.0",  "lts": false},
+    {"cycle": "16", "releaseDate": "2023-09-14", "eol": "2028-11-09", "latest": "16.4",  "lts": false},
+    {"cycle": "15", "releaseDate": "2022-10-13", "eol": "2027-11-11", "latest": "15.8",  "lts": false},
+    {"cycle": "14", "releaseDate": "2021-09-30", "eol": "2026-11-12", "latest": "14.13", "lts": false},
+    {"cycle": "13", "releaseDate": "2020-09-24", "eol": "2025-11-13", "latest": "13.16", "lts": false}
+  ],
+  "mysql": [
+    {"cycle": "8.4", "releaseDate": "2024-04-30", "eol": "2032-04-30", "latest": "8.4.2",  "lts": true},
+    {"cycle": "8.0", "releaseDate": "2018-04-19", "eol": "2026-04-30", "latest": "8.0.39", "lts": false},
+    {"cycle": "5.7", "releaseDate": "2015-10-21", "eol": "2023-10-31", "latest": "5.7.44", "lts": false}
+  ],
+  "redis": [
+    {"cycle": "7", "releaseDate": "2022-04-27", "eol": true,         "latest": "7.4.1",  "lts": false},
+    {"cycle": "6", "releaseDate": "2020-04-30", "eol": "2024-02-01", "latest": "6.2.16", "lts": false}
+  ],
+  "kubernetes": [
+    {"cycle": "1.31", "releaseDate": "2024-08-13", "eol": "2025-10-28", "latest": "1.31.2",  "lts": false},
+    {"cycle": "1.30", "releaseDate": "2024-04-17", "eol": "2025-06-28", "latest": "1.30.6",  "lts": false},
+    {"cycle": "1.29", "releaseDate": "2023-12-13", "eol": "2025-02-28", "latest": "1.29.10", "lts": false},
+    {"cycle": "1.28", "releaseDate": "2023-08-15", "eol": "2024-10-28", "latest": "1.28.15", "lts": false}
+  ],
+  "docker-engine": [
+    {"cycle": "27", "releaseDate": "2024-06-06", "eol": false,        "latest": "27.3.1", "lts": false},
+    {"cycle": "26", "releaseDate": "2024-04-04", "eol": true,         "latest": "26.1.5", "lts": false}
+  ]
+}

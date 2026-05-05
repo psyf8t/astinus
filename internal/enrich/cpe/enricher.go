@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/psyf8t/astinus/internal/image"
 	"github.com/psyf8t/astinus/internal/sbom/model"
@@ -14,30 +15,53 @@ const Name = "cpe"
 
 // Enricher is the cpe enrich.Enricher implementation.
 //
-// Behavior per Component:
+// Sprint 3 Task 0 changed the output schema:
 //
-//   - If the component has a PURL but no CPE → run the resolver
-//     chain, append any matches to Component.CPEs, record provenance
-//     in Properties.
-//   - If the component already has CPEs → validate each. Drop
-//     malformed entries (logged via the property bag) and stamp
-//     `astinus:cpe:validated = true` on survivors so a downstream
-//     consumer can tell we've checked them.
-//   - If the component has no PURL → no-op.
+//   - The Component's `cpe` field carries the single highest-confidence
+//     candidate (>= Threshold.PrimaryMin).
+//   - Other candidates that score >= Threshold.AlternativeMin are
+//     surfaced as `astinus:cpe:alternative:N` properties, with their
+//     own `:source` and `:confidence` siblings.
+//   - Candidates below the alternative floor (and any hard-rejected
+//     hardware-CPE-on-software-PURL entries from NVD) are dropped from
+//     the SBOM by default. With `--include-rejected-cpe` they appear
+//     as `astinus:cpe:rejected:N` for diagnostics.
 //
-// Idempotent: re-running over the same SBOM yields the same answer.
-// Recurses into SubComponents so untracked Go-binary modules also
-// benefit.
+// The previous schema stamped a single `astinus:cpe:confidence=high`
+// onto the Component regardless of the underlying candidates, which
+// surfaced router/auction-site CPEs to vulnerability scanners as
+// authoritative — see ADR-0029.
 type Enricher struct {
-	chain Resolver
+	chain           Resolver
+	threshold       Threshold
+	includeRejected bool
 }
 
-// New returns an Enricher with DefaultChain().
-func New() *Enricher { return &Enricher{chain: DefaultChain()} }
+// New returns an Enricher with DefaultChain() and DefaultThreshold().
+func New() *Enricher {
+	return &Enricher{chain: DefaultChain(), threshold: DefaultThreshold()}
+}
 
 // NewWithResolver returns an Enricher with the supplied resolver.
 // Useful for tests that want to drive a deterministic chain.
-func NewWithResolver(r Resolver) *Enricher { return &Enricher{chain: r} }
+func NewWithResolver(r Resolver) *Enricher {
+	return &Enricher{chain: r, threshold: DefaultThreshold()}
+}
+
+// WithIncludeRejected toggles whether rejected candidates are written
+// to the SBOM as `astinus:cpe:rejected:N` properties (in addition to
+// the always-on debug log). Used by `--include-rejected-cpe`.
+func (e *Enricher) WithIncludeRejected(b bool) *Enricher {
+	e.includeRejected = b
+	return e
+}
+
+// WithThreshold overrides the confidence cutoffs the enricher applies
+// when classifying candidates. Useful for policy-driven tuning.
+func (e *Enricher) WithThreshold(t Threshold) *Enricher {
+	e.threshold = t
+	return e
+}
 
 // Name implements enrich.Enricher.
 func (*Enricher) Name() string { return Name }
@@ -47,8 +71,10 @@ func (*Enricher) Name() string { return Name }
 // extractors (PRSD-Task-4, wired into untracked.processFile) are
 // the source of those PURLs for binary-shaped untracked entries.
 // Declaring "untracked" guarantees we only resolve once the PURLs
-// are populated.
-func (*Enricher) Dependencies() []string { return []string{"untracked"} }
+// are populated. S3 Task 1 adds "extractor" so the lifted
+// embedded-dependency components (yq's gopkg.in/yaml.v3 etc.) also
+// pick up CPEs.
+func (*Enricher) Dependencies() []string { return []string{"untracked", "extractor"} }
 
 // Enrich implements enrich.Enricher.
 //
@@ -74,6 +100,8 @@ func (e *Enricher) Enrich(_ context.Context, sbom *model.SBOM, bundle *image.Bun
 		"no_match", stats.noMatch,
 		"no_purl", stats.noPURL,
 		"purl_error", stats.purlError,
+		"alternatives_kept", stats.alternativesKept,
+		"rejected", stats.rejectedCount,
 	)
 	return nil
 }
@@ -82,37 +110,45 @@ func (e *Enricher) Enrich(_ context.Context, sbom *model.SBOM, bundle *image.Bun
 // Surfaced via the cpe.complete log so operators can see actual
 // enrichment effectiveness (post-Stage-13 hardening Task 5.3).
 type enrichStats struct {
-	examined      int
-	hadCPEAlready int
-	addedCPE      int // components for which the resolver added at least one CPE
-	validated     int // existing CPEs validated (and the component had any)
-	noMatch       int // PURL parsed but resolver returned nothing
-	noPURL        int // no PURL at all → can't enrich
-	purlError     int // PURL malformed
+	examined         int
+	hadCPEAlready    int
+	addedCPE         int // components for which the resolver added at least one CPE
+	validated        int // existing CPEs validated (and the component had any)
+	noMatch          int // no candidate cleared even the alternative floor
+	noPURL           int // no PURL at all → can't enrich
+	purlError        int // PURL malformed
+	alternativesKept int // count of `astinus:cpe:alternative:N` properties written
+	rejectedCount    int // count of candidates classified as rejected
 }
 
 // enrichOne mutates c in place per the contract above.
-//
-// Behavior change in post-Stage-13 hardening Task 5.1: the enricher
-// no longer bails early when CPEs already exist. Syft fills every
-// component with a placeholder CPE (`vendor=name, product=name`)
-// that almost never matches NVD's actual entries. Instead we now
-// ALWAYS validate existing CPEs AND ALWAYS run the resolver if a
-// PURL is set, appending unique resolver results alongside.
 func (e *Enricher) enrichOne(c *model.Component, stats *enrichStats) {
 	stats.examined++
+
+	// Wipe any astinus:cpe:* breadcrumbs from a previous run so re-
+	// enrichment is idempotent and the alternative numbering does
+	// not pile up.
+	clearCPEProperties(c)
 
 	hadExisting := len(c.CPEs) > 0
 	if hadExisting {
 		stats.hadCPEAlready++
-		validateExisting(c)
+	}
+
+	// Build the candidate slate: existing CPEs + resolver matches.
+	cands := candidatesFromExistingCPEs(c.CPEs)
+	if hadExisting {
 		stats.validated++
 	}
 
 	if c.PURL == "" {
 		if !hadExisting {
 			stats.noPURL++
+			return
 		}
+		// No PURL but pre-existing CPEs — apply classification on the
+		// existing ones alone.
+		e.writeResults(c, cands, stats)
 		return
 	}
 
@@ -123,67 +159,175 @@ func (e *Enricher) enrichOne(c *model.Component, stats *enrichStats) {
 		return
 	}
 
-	matches := e.chain.Resolve(purl)
-	if len(matches) == 0 {
+	cands = append(cands, e.chain.Resolve(purl)...)
+
+	if len(cands) == 0 {
 		stats.noMatch++
 		setProp(c, "astinus:cpe:lookup", "no-match")
 		return
 	}
 
-	// Append unique resolver matches alongside any existing CPEs
-	// (Syft's placeholder + Astinus's authoritative now coexist).
-	before := len(c.CPEs)
-	c.CPEs = appendUnique(c.CPEs, matches)
-	if len(c.CPEs) > before {
+	addedCPE := e.writeResults(c, cands, stats)
+	if addedCPE {
 		stats.addedCPE++
-		// Record source + confidence of the WINNING resolver match.
-		setProp(c, "astinus:cpe:source", string(matches[0].Source))
-		setProp(c, "astinus:cpe:confidence", string(matches[0].Confidence))
 	}
 }
 
-// validateExisting drops malformed CPE strings from c.CPEs and
-// stamps a property recording how many survived. Deliberately does
-// NOT remove a single-CPE entry that is malformed (that would lose
-// the data); instead it stamps `:invalid = true` so a downstream
-// consumer can decide.
-func validateExisting(c *model.Component) {
-	good := make([]string, 0, len(c.CPEs))
-	for _, s := range c.CPEs {
+// candidatesFromExistingCPEs converts CPE strings already on a
+// Component into Candidate proposals. Valid entries score
+// ConfidenceMedium so they remain primary in the absence of a better
+// resolver match; invalid entries score ConfidenceReject so Classify
+// surfaces them with an explanatory RejectedReason.
+func candidatesFromExistingCPEs(cpes []string) []Candidate {
+	if len(cpes) == 0 {
+		return nil
+	}
+	out := make([]Candidate, 0, len(cpes))
+	for _, s := range cpes {
 		if IsValidCPE(s) {
-			good = append(good, s)
+			out = append(out, Candidate{
+				CPE:        s,
+				Source:     SourceInput,
+				Confidence: ConfidenceMedium,
+				Evidence:   "input SBOM",
+				MatchDetails: MatchDetails{
+					SearchMethod: "purl-direct",
+				},
+			})
+			continue
 		}
-	}
-	if len(good) == len(c.CPEs) {
-		setProp(c, "astinus:cpe:validated", "true")
-		return
-	}
-	if len(good) == 0 {
-		// Keep at least one so the data is not silently lost.
-		setProp(c, "astinus:cpe:validated", "false")
-		setProp(c, "astinus:cpe:invalid", "true")
-		return
-	}
-	c.CPEs = good
-	setProp(c, "astinus:cpe:validated", "partial")
-}
-
-// appendUnique appends every match's CPE to existing iff not already
-// present. Matches preserve order; existing CPEs are left in place
-// at their original position.
-func appendUnique(existing []string, matches []Match) []string {
-	have := make(map[string]bool, len(existing))
-	for _, e := range existing {
-		have[e] = true
-	}
-	out := existing
-	for _, m := range matches {
-		if !have[m.CPE] {
-			out = append(out, m.CPE)
-			have[m.CPE] = true
-		}
+		out = append(out, Candidate{
+			CPE:            s,
+			Source:         SourceInput,
+			Confidence:     ConfidenceReject,
+			Evidence:       "input SBOM",
+			RejectedReason: "input CPE failed CPE 2.3 syntax validation",
+		})
 	}
 	return out
+}
+
+// writeResults runs Classify over cands and projects the result onto
+// the Component. Returns true when the Component picked up at least
+// one CPE that wasn't already present.
+func (e *Enricher) writeResults(c *model.Component, cands []Candidate, stats *enrichStats) bool {
+	cands = DedupeCandidates(cands)
+	primary, alts, rejected := Classify(cands, e.threshold)
+
+	originalCPEs := append([]string(nil), c.CPEs...)
+	c.CPEs = nil
+
+	added := false
+	if primary != nil {
+		c.CPEs = []string{primary.CPE}
+		setProp(c, "astinus:cpe:source", string(primary.Source))
+		setProp(c, "astinus:cpe:confidence", formatConfidence(primary.Confidence))
+		if primary.Evidence != "" {
+			setProp(c, "astinus:cpe:evidence", primary.Evidence)
+		}
+		setValidationStamps(c, originalCPEs)
+		if !contains(originalCPEs, primary.CPE) {
+			added = true
+		}
+	} else if len(originalCPEs) > 0 {
+		// Nothing cleared the primary floor but we shouldn't drop
+		// the input CPEs silently — keep them so downstream consumers
+		// still see the data the operator started with.
+		c.CPEs = originalCPEs
+		setValidationStamps(c, originalCPEs)
+		setProp(c, "astinus:cpe:lookup", "no-primary-above-threshold")
+	} else {
+		setProp(c, "astinus:cpe:lookup", "no-match")
+	}
+
+	for i, alt := range alts {
+		idx := i + 1
+		setProp(c, fmt.Sprintf("astinus:cpe:alternative:%d", idx), alt.CPE)
+		setProp(c, fmt.Sprintf("astinus:cpe:alternative:%d:source", idx), string(alt.Source))
+		setProp(c, fmt.Sprintf("astinus:cpe:alternative:%d:confidence", idx), formatConfidence(alt.Confidence))
+		stats.alternativesKept++
+	}
+
+	for i, rej := range rejected {
+		slog.Default().Debug("cpe.rejected",
+			"component", c.Name,
+			"cpe", rej.CPE,
+			"confidence", rej.Confidence,
+			"source", rej.Source,
+			"reason", rej.RejectedReason)
+		stats.rejectedCount++
+		if !e.includeRejected {
+			continue
+		}
+		idx := i + 1
+		setProp(c, fmt.Sprintf("astinus:cpe:rejected:%d", idx), rej.CPE)
+		setProp(c, fmt.Sprintf("astinus:cpe:rejected:%d:source", idx), string(rej.Source))
+		setProp(c, fmt.Sprintf("astinus:cpe:rejected:%d:confidence", idx), formatConfidence(rej.Confidence))
+		if rej.RejectedReason != "" {
+			setProp(c, fmt.Sprintf("astinus:cpe:rejected:%d:reason", idx), rej.RejectedReason)
+		}
+	}
+
+	return added
+}
+
+// setValidationStamps mirrors the legacy validated/invalid stamps so
+// downstream consumers (compliance, sarif, summary) keep working.
+// Looks at the ORIGINAL set of CPEs that the component arrived with,
+// not the post-classification slate.
+func setValidationStamps(c *model.Component, original []string) {
+	if len(original) == 0 {
+		return
+	}
+	good, bad := 0, 0
+	for _, s := range original {
+		if IsValidCPE(s) {
+			good++
+		} else {
+			bad++
+		}
+	}
+	switch {
+	case bad == 0:
+		setProp(c, "astinus:cpe:validated", "true")
+	case good == 0:
+		setProp(c, "astinus:cpe:validated", "false")
+		setProp(c, "astinus:cpe:invalid", "true")
+	default:
+		setProp(c, "astinus:cpe:validated", "partial")
+	}
+}
+
+// clearCPEProperties drops every astinus:cpe:* breadcrumb from c so
+// the enricher can rewrite a fresh slate. Kept tight on the cpe:
+// prefix so we don't accidentally clobber other astinus:* keys.
+func clearCPEProperties(c *model.Component) {
+	if c.Properties == nil {
+		return
+	}
+	for k := range c.Properties {
+		if strings.HasPrefix(k, "astinus:cpe:") {
+			delete(c.Properties, k)
+		}
+	}
+}
+
+// formatConfidence renders a confidence float as a 2-decimal string
+// for property values. Renderers that gate on it (sarif, summary)
+// parse it back to compare against their own thresholds.
+func formatConfidence(c float64) string {
+	return fmt.Sprintf("%.2f", c)
+}
+
+// contains is a tiny helper used to dedupe primary CPEs against the
+// component's prior set.
+func contains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }
 
 // walk applies fn to every component (recursively into SubComponents).

@@ -199,21 +199,41 @@ func (l *LocalDictionaryResolver) loadByName(dir string) error {
 }
 
 // Resolve implements Resolver.
-func (l *LocalDictionaryResolver) Resolve(p PURL) []Match {
+//
+// Confidence is ConfidenceHigh for both index hits — the operator
+// pre-curated the catalogue. Sprint 3 Task 0 routes the answer
+// through the new Candidate type so the orchestrator can attribute
+// per-candidate confidence rather than blanket-stamping the
+// component.
+func (l *LocalDictionaryResolver) Resolve(p PURL) []Candidate {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	if e, ok := l.byPurl[p.String()]; ok {
-		return []Match{{
+		return []Candidate{{
 			CPE:        Build(e.Vendor, e.Product, p.Version),
-			Source:     SourceBundled, // local dict is high-confidence by design
+			Source:     SourceLocalDict,
 			Confidence: ConfidenceHigh,
+			Evidence:   "local-dictionary by-purl exact",
+			MatchDetails: MatchDetails{
+				VendorMatch:  "known-mapping",
+				ProductMatch: "known-mapping",
+				VersionMatch: versionMatchKind(p.Version),
+				SearchMethod: "purl-direct",
+			},
 		}}
 	}
 	if e, ok := l.byName[strings.ToLower(p.Type)+"|"+strings.ToLower(p.Name)]; ok {
-		return []Match{{
+		return []Candidate{{
 			CPE:        Build(e.Vendor, e.Product, p.Version),
-			Source:     SourceBundled,
+			Source:     SourceLocalDict,
 			Confidence: ConfidenceHigh,
+			Evidence:   "local-dictionary by-name fallback",
+			MatchDetails: MatchDetails{
+				VendorMatch:  "known-mapping",
+				ProductMatch: "known-mapping",
+				VersionMatch: versionMatchKind(p.Version),
+				SearchMethod: "dictionary-lookup",
+			},
 		}}
 	}
 	return nil

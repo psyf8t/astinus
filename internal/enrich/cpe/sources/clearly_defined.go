@@ -58,7 +58,7 @@ func (*ClearlyDefinedSource) Name() string { return "clearly-defined" }
 //
 // Errors are returned only for HTTP 5xx and parser failures —
 // "not found" is not an error.
-func (s *ClearlyDefinedSource) Match(ctx context.Context, purl cpe.PURL) ([]cpe.Match, error) {
+func (s *ClearlyDefinedSource) Match(ctx context.Context, purl cpe.PURL) ([]cpe.Candidate, error) {
 	coords, ok := purlToCDCoordinates(purl)
 	if !ok {
 		return nil, nil
@@ -93,15 +93,19 @@ func (s *ClearlyDefinedSource) Match(ctx context.Context, purl cpe.PURL) ([]cpe.
 		return nil, fmt.Errorf("clearly-defined: parse JSON: %w", err)
 	}
 
-	out := make([]cpe.Match, 0, len(def.Described.Identifiers.CPE))
+	out := make([]cpe.Candidate, 0, len(def.Described.Identifiers.CPE))
 	for _, c := range def.Described.Identifiers.CPE {
 		if !cpe.IsValidCPE(c) {
 			continue
 		}
-		out = append(out, cpe.Match{
+		out = append(out, cpe.Candidate{
 			CPE:        c,
 			Source:     cpe.Source("clearly-defined"),
 			Confidence: cpe.ConfidenceHigh,
+			Evidence:   "clearly-defined identifiers.cpe",
+			MatchDetails: cpe.MatchDetails{
+				SearchMethod: "purl-direct",
+			},
 		})
 	}
 	return out, nil
