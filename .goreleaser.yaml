@@ -1,0 +1,154 @@
+# .goreleaser.yaml
+# Reference: https://goreleaser.com/customization/
+
+version: 2
+
+project_name: astinus
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: astinus
+    main: ./cmd/astinus
+    binary: astinus
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -buildid=
+      - -X github.com/psyf8t/astinus/internal/version.Version={{.Version}}
+      - -X github.com/psyf8t/astinus/internal/version.Commit={{.Commit}}
+      - -X github.com/psyf8t/astinus/internal/version.Date={{.Date}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: astinus
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: '{{ .ProjectName }}_{{ .Version }}_SHA256SUMS'
+  algorithm: sha256
+
+# Cosign keyless signing of the SHA256SUMS file. Works on
+# GitHub Actions runners (OIDC token from GITHUB_TOKEN); local
+# `goreleaser release` runs without OIDC will fail this step
+# unless --skip=sign is passed.
+signs:
+  - id: keyless
+    cmd: cosign
+    args:
+      - sign-blob
+      - --yes
+      - --output-signature=${signature}
+      - --output-certificate=${certificate}
+      - ${artifact}
+    artifacts: checksum
+    output: true
+
+# Multi-arch container image pushed to ghcr.io. The base layer
+# is the existing distroless Dockerfile.
+dockers:
+  - image_templates:
+      - "ghcr.io/psyf8t/astinus:{{ .Version }}-amd64"
+    use: buildx
+    dockerfile: Dockerfile.release
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.source=https://github.com/psyf8t/astinus"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+  - image_templates:
+      - "ghcr.io/psyf8t/astinus:{{ .Version }}-arm64"
+    use: buildx
+    goarch: arm64
+    dockerfile: Dockerfile.release
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.source=https://github.com/psyf8t/astinus"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+
+docker_manifests:
+  - name_template: "ghcr.io/psyf8t/astinus:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/psyf8t/astinus:{{ .Version }}-amd64"
+      - "ghcr.io/psyf8t/astinus:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/psyf8t/astinus:latest"
+    image_templates:
+      - "ghcr.io/psyf8t/astinus:{{ .Version }}-amd64"
+      - "ghcr.io/psyf8t/astinus:{{ .Version }}-arm64"
+
+release:
+  github:
+    owner: psyf8t
+    name: astinus
+  draft: true
+  prerelease: auto
+  mode: replace
+  name_template: "v{{ .Version }}"
+  header: |
+    ## Astinus v{{ .Version }}
+
+    SBOM enricher for Docker/OCI containers — see
+    [README](https://github.com/psyf8t/astinus#readme) for what it does.
+
+  footer: |
+    ---
+
+    Verifying release artifacts:
+
+    ```bash
+    cosign verify-blob \
+      --certificate astinus_{{ .Version }}_SHA256SUMS.pem \
+      --signature astinus_{{ .Version }}_SHA256SUMS.sig \
+      --certificate-identity-regexp 'https://github.com/psyf8t/astinus/.*' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      astinus_{{ .Version }}_SHA256SUMS
+    ```
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^chore:'
+      - '^ci:'
+      - '^test:'
+      - 'Merge pull request'
+      - 'Merge branch'
