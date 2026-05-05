@@ -1,0 +1,32 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "components": [
+    {
+      "bom-ref": "myapp@1.0",
+      "type": "application",
+      "name": "myapp",
+      "version": "1.0",
+      "components": [
+        {
+          "bom-ref": "myapp@1.0/lib/logger.jar",
+          "type": "library",
+          "name": "logger",
+          "version": "2.20.0",
+          "purl": "pkg:maven/org.apache.logging.log4j/log4j-core@2.20.0",
+          "hashes": [
+            {"alg": "SHA-256", "content": "44444444444444444444444444444444"}
+          ]
+        },
+        {
+          "bom-ref": "myapp@1.0/lib/jdbc.jar",
+          "type": "library",
+          "name": "jdbc-driver",
+          "version": "42.7.4",
+          "purl": "pkg:maven/org.postgresql/postgresql@42.7.4"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1.7
+#
+# Runtime-only image used by .goreleaser.yaml. GoReleaser builds the
+# binary (cross-compile with -trimpath + version ldflags applied) and
+# hands it to docker as the build context. We just package it into a
+# distroless layer.
+#
+# For dev builds from a source clone use the top-level Dockerfile,
+# which compiles from source.
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY astinus /usr/local/bin/astinus
+
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/astinus"]

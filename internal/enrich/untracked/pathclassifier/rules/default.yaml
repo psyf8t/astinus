@@ -1,0 +1,278 @@
+# Default path classification rules for the untracked enricher.
+#
+# Schema version: 1. See pathclassifier/loader.go for the loader.
+# Operators can override or extend these via `astinus enrich
+# --rules-file <path/to/custom.yaml>`. A custom rule with the same
+# Name as a default rule replaces the default.
+#
+# Rule entries:
+#   name        — unique identifier (also the override key)
+#   description — human-readable; not consumed by the classifier
+#   action      — skip | redundant_under_archive | mark_as_noise | mark_as_redundant
+#   pattern.type   — prefix | suffix | filename_exact | glob | regex
+#   pattern.values — list of strings interpreted by `type`
+#   rationale   — operator-facing explanation surfaced in debug logs
+#   confidence  — float, default 1.0; reserved for future weighting
+#   applies_to  — categories filter; reserved for future use
+
+version: 1
+rules:
+  # ─── X11 locale data ────────────────────────────────────────────
+  - name: x11-locale
+    description: X11 locale data files (Compose, XLC_LOCALE, XI18N_OBJS)
+    action: skip
+    pattern:
+      type: prefix
+      values:
+        - /usr/share/X11/locale/
+        - /usr/lib/X11/locale/
+        - usr/share/X11/locale/
+        - usr/lib/X11/locale/
+    rationale: Locale fallback tables; not components per NTIA definition
+
+  # ─── Perl Unicode tables ────────────────────────────────────────
+  # Regex (not glob) because path/filepath.Match's `*` does not cross
+  # `/` and does not support `**` — Perl unicore data sits arbitrary
+  # depths under per-arch lib directories, so we anchor on the
+  # distinctive `perl(-base)?/.../unicore/` substring.
+  - name: perl-unicore
+    description: Perl Unicode tables (auto-generated from UCD)
+    action: skip
+    pattern:
+      type: regex
+      values:
+        - '/perl-base/unicore/'
+        - '/perl/[^/]+/unicore/'
+    rationale: Auto-generated Unicode lookup tables from UCD
+
+  # ─── Bash completion ────────────────────────────────────────────
+  - name: bash-completion
+    description: Bash completion scripts
+    action: skip
+    pattern:
+      type: prefix
+      values:
+        - /usr/share/bash-completion/
+        - /etc/bash_completion.d/
+        - usr/share/bash-completion/
+        - etc/bash_completion.d/
+    rationale: Shell completions, not shipped components
+
+  # ─── System config files ────────────────────────────────────────
+  - name: apt-config
+    description: APT package manager configuration
+    action: skip
+    pattern:
+      type: prefix
+      values:
+        - /etc/apt/apt.conf.d/
+        - /etc/apt/sources.list.d/
+        - /etc/apt/preferences.d/
+        - /var/lib/apt/lists/
+        - etc/apt/apt.conf.d/
+        - etc/apt/sources.list.d/
+        - etc/apt/preferences.d/
+        - var/lib/apt/lists/
+    rationale: APT package manager configuration
+
+  - name: pam-config
+    description: PAM authentication module config
+    action: skip
+    pattern:
+      type: prefix
+      values:
+        - /etc/pam.d/
+        - /etc/pam.conf.d/
+        - etc/pam.d/
+        - etc/pam.conf.d/
+    rationale: PAM module config; not components
+
+  - name: scheduler-config
+    description: System scheduler / log rotation configuration
+    action: skip
+    pattern:
+      type: prefix
+      values:
+        - /etc/logrotate.d/
+        - /etc/cron.d/
+        - /etc/cron.daily/
+        - /etc/cron.hourly/
+        - /etc/cron.monthly/
+        - /etc/cron.weekly/
+        - etc/logrotate.d/
+        - etc/cron.d/
+        - etc/cron.daily/
+        - etc/cron.hourly/
+        - etc/cron.monthly/
+        - etc/cron.weekly/
+    rationale: System scheduler / log rotation configuration
+
+  - name: dpkg-state
+    description: DPKG package manager state
+    action: skip
+    pattern:
+      type: prefix
+      values:
+        - /var/lib/dpkg/info/
+        - /var/lib/dpkg/alternatives/
+        - var/lib/dpkg/info/
+        - var/lib/dpkg/alternatives/
+    rationale: DPKG package manager state
+
+  # ─── Locale data ────────────────────────────────────────────────
+  - name: locale-data
+    description: System locale data
+    action: skip
+    pattern:
+      type: prefix
+      values:
+        - /usr/share/locale/
+        - /usr/share/i18n/
+        - /usr/lib/locale/
+        - usr/share/locale/
+        - usr/share/i18n/
+        - usr/lib/locale/
+    rationale: Locale message catalogs; not components
+
+  # ─── Documentation ──────────────────────────────────────────────
+  - name: man-pages
+    description: Manual pages and info files
+    action: skip
+    pattern:
+      type: prefix
+      values:
+        - /usr/share/man/
+        - /usr/share/info/
+        - usr/share/man/
+        - usr/share/info/
+    rationale: Documentation; not shipped components
+
+  - name: doc-dirs
+    description: Per-package documentation directories
+    action: skip
+    pattern:
+      type: prefix
+      values:
+        - /usr/share/doc/
+        - usr/share/doc/
+    rationale: Package documentation directories
+
+  # ─── Time zones ─────────────────────────────────────────────────
+  - name: zoneinfo
+    description: Time zone data
+    action: skip
+    pattern:
+      type: prefix
+      values:
+        - /usr/share/zoneinfo/
+        - usr/share/zoneinfo/
+    rationale: Time zone data
+
+  # ─── Standard package metadata files ────────────────────────────
+  - name: package-metadata-files
+    description: Standard package metadata (LICENSE, README, etc.)
+    action: skip
+    pattern:
+      type: filename_exact
+      values:
+        - LICENSE
+        - LICENCE
+        - License
+        - license
+        - COPYING
+        - COPYRIGHT
+        - NOTICE
+        - README
+        - README.md
+        - README.rst
+        - README.txt
+        - CHANGELOG
+        - CHANGELOG.md
+        - CHANGES
+        - AUTHORS
+        - CONTRIBUTORS
+        - MAINTAINERS
+        - PATENTS
+        - VERSION
+        - INSTALL
+    rationale: NTIA — supplementary metadata, not unique components
+
+  # ─── Test fixtures inside extracted source archives ─────────────
+  - name: extracted-source-tests
+    description: Test fixtures inside extracted source archives
+    action: redundant_under_archive
+    pattern:
+      type: regex
+      values:
+        - '^/?opt/extracted/[^/]+/tests?/'
+        - '^/?opt/extracted/[^/]+/ext/[^/]+/tests?/'
+    rationale: Test fixtures inside extracted source archive
+
+  # ─── Source code ────────────────────────────────────────────────
+  - name: c-cpp-sources
+    description: C/C++ source files
+    action: skip
+    pattern:
+      type: suffix
+      values:
+        - .h
+        - .hpp
+        - .hxx
+        - .c
+        - .cc
+        - .cpp
+        - .cxx
+    rationale: Source code, typically not shipped components
+
+  - name: build-artifacts
+    description: Compiled object files and static archives
+    action: skip
+    pattern:
+      type: suffix
+      values:
+        - .o
+        - .obj
+        - .lo
+        - .la
+    rationale: Compiled object files and libtool intermediates
+
+  - name: python-bytecode
+    description: Python bytecode
+    action: skip
+    pattern:
+      type: suffix
+      values:
+        - .pyc
+        - .pyo
+    rationale: Python bytecode; not source components
+
+  - name: source-maps
+    description: JavaScript source maps
+    action: skip
+    pattern:
+      type: suffix
+      values:
+        - .map
+    rationale: Debug artefact; not a shipped component
+
+  - name: test-suffix
+    description: Test scripts and fixtures
+    action: skip
+    pattern:
+      type: suffix
+      values:
+        - .test
+        - .spec
+    rationale: Test scripts / fixtures
+
+  # ─── Cryptographic signatures ───────────────────────────────────
+  - name: gpg-signatures
+    description: GPG / cryptographic signatures
+    action: skip
+    pattern:
+      type: suffix
+      values:
+        - .asc
+        - .sig
+        - .gpg
+    rationale: Cryptographic signatures, not components themselves

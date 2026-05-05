@@ -1,0 +1,10 @@
+# <type>(<scope>): <subject>
+#
+# Body (wrap at 72 cols):
+#
+# Footer (e.g. Refs / Fixes):
+
+# Conventional commits + Astinus convention:
+#   - prefix [s3-task-N] / [release-prep-X] / [stage-N] for context
+#   - imperative mood ("add", not "added")
+#   - NO Co-Authored-By for AI tools (people only)
