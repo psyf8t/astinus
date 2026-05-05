@@ -64,6 +64,7 @@ checksum:
 signs:
   - id: keyless
     cmd: cosign
+    certificate: "${artifact}.pem"
     args:
       - sign-blob
       - --yes
