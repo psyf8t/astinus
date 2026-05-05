@@ -3,6 +3,12 @@
 All notable changes that affect operator-visible behaviour or the
 public CLI / output surface.
 
+> **About ADR references.** Architecture Decision Records are kept
+> internal in v0.0.x — references like `ADR-0036` in the entries
+> below correspond to in-tree documents that are not yet published.
+> The public ADR layout is being decided in
+> [#9](https://github.com/psyf8t/astinus/issues/9).
+
 ## Unreleased
 
 <!-- Next release entries go here. -->

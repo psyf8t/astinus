@@ -15,6 +15,10 @@ Task-flavoured walkthroughs:
 - **[signing.md](signing.md)** — cosign sign + verify, key-based and keyless, in-toto attestations.
 - **[compliance.md](compliance.md)** — `--fail-on`, the bundled NTIA / EU CRA validators, severity overrides.
 
+Operations:
+
+- **[releasing.md](releasing.md)** — release process, tagging, verifying release artifacts.
+
 Architecture decisions live under [adr/](adr/) — one file per
 material decision, dated, with the alternatives that were
 considered.
