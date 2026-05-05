@@ -1,10 +1,124 @@
 # Changelog
 
-All notable post-stage fixes that change observable behaviour. Stage
-deliverables themselves are tracked in the implementation log; this
-file is for cross-stage fixes that an operator might bisect against.
+All notable changes that affect operator-visible behaviour or the
+public CLI / output surface.
 
-## Unreleased — Sprint 3 (Real-World Enrichment)
+## Unreleased
+
+<!-- Next release entries go here. -->
+
+## v0.0.1 — YYYY-MM-DD (first public release)
+
+This is the first public tag. It bundles three internal
+development sprints — Hardening Sprint #1, Production Readiness
+Sprint #2, and Real-World Enrichment Sprint #3 — into a single
+coherent release. The detailed per-sprint changelogs are
+preserved verbatim under [Pre-1.0 sprint logs](#pre-10-sprint-logs-for-archaeology)
+below.
+
+### Highlights
+
+- **Layer attribution** — every component carries the layer
+  digest, layer index, and Dockerfile instruction (`RUN` / `COPY`
+  / `ADD`) that introduced it.
+- **Base-image diff** — components are split into `base` /
+  `app` / `unknown`. Auto-detects the base image from OCI
+  labels; content-addressable Tier 1 strategy handles squashed
+  and multi-stage images.
+- **Untracked-component detection** — vendored binaries / archives
+  / scripts that no package manager tracks. Multi-modal extractor
+  registry (Go buildinfo, Rust `.dep-v0`, Java POM/manifest,
+  Python METADATA, ELF, PE) lifts embedded modules into top-level
+  components with `RelationshipDependsOn` edges.
+- **Multi-runtime matrix** — Docker, BuildKit (with provenance
+  attestation round-trip), Podman, Buildah, Kaniko.
+- **CPE enrichment** — bundled dictionary (~217 entries) +
+  per-PURL-type heuristic + NVD API source with token-bucket
+  rate-limit. Online / offline / hybrid modes; `--no-network`
+  forces offline. Per-Candidate confidence scoring; hardware-
+  CPE-on-software-PURL hard-rejected (closes the v0.2 yq → Linksys
+  router false positive).
+- **Package-registry metadata** — license / supplier / homepage /
+  repository fetched from npm, PyPI, Maven Central, and the Go
+  module proxy. Adapters for cargo / RubyGems / NuGet / Debian /
+  Alpine / Repology / ecosyste.ms are stub-registered (return
+  `ErrNotFound` — components from those ecosystems pass through
+  unchanged); tracked under the [`registry-source`](https://github.com/psyf8t/astinus/issues?q=label%3Aregistry-source)
+  label.
+- **Lifecycle / EOL annotations** — runtime and OS components
+  (Node, Python, Go, Java, Debian, Ubuntu, Alpine, Postgres, MySQL,
+  Redis, Kubernetes, Docker, …) get `astinus:lifecycle:status` /
+  `:eol` / `:active-support-end` from
+  [endoflife.date](https://endoflife.date) plus a bundled offline
+  snapshot.
+- **Compliance validators** — NTIA Minimum Elements + EU CRA
+  Article 13. Per-ecosystem severity policy keeps the noise
+  manageable; `--fail-on <severity>` exits 40 when findings cross
+  the gate.
+- **Cosign signing** — `--sign-with cosign-key` or `cosign-keyless`
+  produces detached signatures or in-toto attestations attached to
+  an OCI image. New top-level `astinus verify` subcommand wraps
+  `cosign verify-blob` + `cosign verify-attestation`. Subprocess
+  approach keeps the binary at ~12 MiB (sigstore-go would have
+  pushed it past 60 MiB).
+- **Corporate environment support** — HTTP/HTTPS proxy via env,
+  per-mirror config (replace + fallback modes, bearer / basic /
+  custom-header auth, mTLS client cert, custom CA bundle),
+  air-gapped `--no-network` mode with an offline catalogue layout
+  and bundled lifecycle snapshot.
+- **Acceptance suite** — both the Sprint 3 in-process suite
+  (~22 s, no docker required) and the PRSD-Task-9 image / scanner
+  / runtime / validator matrix (~30 min, docker + tooling
+  required). Total: 19 in-process tests + 8 image-type tests + 5
+  runtime tests + 3 scanner tests + 3 validator tests +
+  performance benchmarks for 1 GB / 5 GB / memory / Sprint 3
+  enrichment paths.
+
+### Output formats
+
+- **Read:** CycloneDX 1.5 and 1.6 (JSON, XML); SPDX 2.2 and 2.3
+  (JSON, tag-value).
+- **Write:** CycloneDX 1.6 (JSON, XML); SPDX 2.3 (JSON, tag-value);
+  SARIF 2.1.0 (GitHub Code Scanning ready); plain-text summary.
+
+### Compatibility
+
+- Go ≥ 1.25.9 to build from source. The bundled binaries cover
+  linux / darwin / windows × amd64 / arm64.
+- Distroless container image at `ghcr.io/psyf8t/astinus:v0.0.1`
+  (multi-arch).
+- Release artifacts are signed via Cosign keyless (Sigstore
+  public). The release page footer carries the verification
+  command.
+
+### Known gaps for v0.0.1
+
+- 7 of 11 registry sources are stubs — see the [`registry-source`](https://github.com/psyf8t/astinus/issues?q=label%3Aregistry-source)
+  label for the open work items. Components from those
+  ecosystems still get layer / CPE / lifecycle enrichment; only
+  the package-metadata fetch is a no-op.
+- Architecture Decision Records are kept in `docs/adr/` but the
+  directory is currently `.gitignore`d; the public ADR layout is
+  an open question — see [docs: decide on public ADR layout](https://github.com/psyf8t/astinus/issues?q=label%3Adocumentation+ADR).
+  CHANGELOG references like `ADR-0036` will become live links
+  once the layout is settled.
+- No Helm chart yet (Stage 15 deliverable).
+- No GitHub Action wrapper yet (Stage 15 deliverable).
+
+### Migration / upgrade
+
+This is the first public release. Nothing to migrate.
+
+---
+
+## Pre-1.0 sprint logs (for archaeology)
+
+The detailed sprint-by-sprint changelogs from internal
+development. Preserved verbatim because they're useful for
+bisecting, blame-archaeology, and understanding *why* a given
+behaviour exists.
+
+## Sprint 3 — Real-World Enrichment
 
 ### Added
 
@@ -306,7 +420,7 @@ file is for cross-stage fixes that an operator might bisect against.
   properties for diagnostic inspection. Default off; rejected
   candidates always appear in the DEBUG `cpe.rejected` log.
 
-## v0.2.0 — 2026-05-03 (Production Readiness Sprint)
+## Sprint 2 — Production Readiness (internal pre-release v0.2.0, 2026-05-03)
 
 The Production Readiness Sprint (PRSD-Task-0..9) closes Track A
 (industry compliance), Track B (vulnerability-scanning quality)
@@ -369,7 +483,7 @@ release suitable for production CI pipelines.
   same precedent that kept the binary at ~12 MiB despite ten
   new internal packages.
 
-## Unreleased
+## Sprint 1 — Hardening
 
 ### Performance
 

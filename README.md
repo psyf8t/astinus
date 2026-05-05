@@ -45,10 +45,12 @@ Astinus reads what your scanners wrote and writes what they missed.
 | Auto base-image detection from labels | ❌ | ✅ |
 | Reliable CPE for NVD vulnerability matching | partial | ✅ |
 | Provenance per component (which `RUN` / `COPY`) | ❌ | ✅ |
-| License / homepage / repository from package registries | ❌ | ✅ |
+| License / homepage / repository from package registries² | ❌ | ✅ |
 | Lifecycle / EOL annotations for runtimes and OS | ❌ | ✅ |
 | NTIA + EU CRA compliance findings + `--fail-on` gate | ❌ | ✅ |
 | Cosign signing + in-toto attestations | ❌ | ✅ |
+
+² Registry enrichment ships in v0.0.1 for **npm, PyPI, Maven Central, and the Go module proxy**. Adapters for `cargo`, `RubyGems`, `NuGet`, `Debian`, `Alpine`, [Repology](https://repology.org), and [ecosyste.ms](https://ecosyste.ms) are stub-registered (no runtime hits — components from those ecosystems pass through unchanged) and tracked under the [`registry-source`](https://github.com/psyf8t/astinus/issues?q=label%3Aregistry-source) label. PRs welcome.
 
 ## Built for CI/CD
 

@@ -94,6 +94,38 @@ const MinimalRuntimeSBOM = `{
   ]
 }`
 
+// YQOnlySBOM — single-component SBOM with yq pinned to v4.40.5
+// matching the github.com/mikefarah/yq Go module path. This is the
+// component that triggered the linksys hardware-CPE false positive
+// in the Sprint 2 benchmark output. Used for the Section B
+// regression test that drives end-to-end coverage of the
+// hardware-CPE-on-software-PURL rejection in
+// internal/enrich/cpe/sources/nvd_api.go (ADR-0029).
+const YQOnlySBOM = `{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:44444444-4444-4444-4444-444444444444",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-05-05T00:00:00Z",
+    "component": {
+      "bom-ref": "test-image",
+      "type": "container",
+      "name": "test-image",
+      "version": "1.0"
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "pkg:golang/github.com/mikefarah/yq/v4@4.40.5",
+      "type": "application",
+      "name": "yq",
+      "version": "4.40.5",
+      "purl": "pkg:golang/github.com/mikefarah/yq/v4@4.40.5"
+    }
+  ]
+}`
+
 // WriteSBOMFixture drops body to dir/name and returns the absolute
 // path. Tests pass that path as `--sbom` to the astinus binary.
 func WriteSBOMFixture(tb testing.TB, dir, name, body string) string {

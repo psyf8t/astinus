@@ -105,6 +105,12 @@ type enrichOptions struct {
 	// nvdAPIKey is the NVD API key (env: NVD_API_KEY).
 	// PRSD-Task-5.
 	nvdAPIKey string
+	// nvdAPIURL overrides the NVD CPE API base URL. Empty = the
+	// public Sigstore-style default. Used by corporate operators
+	// who proxy NVD through an internal cache, and by acceptance
+	// tests that need a deterministic mock for hardware-CPE
+	// rejection coverage.
+	nvdAPIURL string
 	// includeRejectedCPE makes the cpe enricher emit
 	// `astinus:cpe:rejected:N` properties for candidates that
 	// scored below the alternative-min threshold (debug surface).
@@ -247,6 +253,9 @@ add the others.`,
 		"CPE resolver mode: online | offline | hybrid (default hybrid)")
 	flags.StringVar(&opts.nvdAPIKey, "nvd-api-key", "",
 		"NVD API key (env: NVD_API_KEY). Higher rate limit (50 req / 30s vs 5 req / 30s)")
+	flags.StringVar(&opts.nvdAPIURL, "nvd-api-url", "",
+		"Override the NVD CPE API base URL. Empty = the public default. "+
+			"Useful for corporate NVD proxies or air-gapped mirrors.")
 	flags.BoolVar(&opts.includeRejectedCPE, "include-rejected-cpe", false,
 		"Emit astinus:cpe:rejected:N properties for CPE candidates "+
 			"that failed the confidence threshold (debug; default off — "+
@@ -997,7 +1006,11 @@ func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Lo
 				"advice", nvdSkipAdvice(componentCount),
 			)
 		} else {
-			srcs = append(srcs, cpesources.NewNVDAPI(nvdKey, client))
+			nvdSrc := cpesources.NewNVDAPI(nvdKey, client)
+			if opts.nvdAPIURL != "" {
+				nvdSrc = nvdSrc.WithBaseURL(opts.nvdAPIURL)
+			}
+			srcs = append(srcs, nvdSrc)
 		}
 		srcs = append(srcs, cpesources.NewClearlyDefined(client))
 	}

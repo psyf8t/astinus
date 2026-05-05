@@ -53,6 +53,8 @@ type EnrichOpts struct {
 	// Networking / corporate environment.
 	NoNetwork bool
 	CACert    string
+	NVDAPIURL string
+	NVDAPIKey string
 
 	// Compliance gate.
 	FailOn           string
@@ -269,6 +271,12 @@ func buildEnrichArgs(opts EnrichOpts, out string) []string {
 	}
 	if opts.CACert != "" {
 		args = append(args, "--ca-cert", opts.CACert)
+	}
+	if opts.NVDAPIURL != "" {
+		args = append(args, "--nvd-api-url", opts.NVDAPIURL)
+	}
+	if opts.NVDAPIKey != "" {
+		args = append(args, "--nvd-api-key", opts.NVDAPIKey)
 	}
 	if opts.FailOn != "" {
 		args = append(args, "--fail-on", opts.FailOn)
