@@ -13,6 +13,8 @@ package attribution
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/psyf8t/astinus/internal/image"
 	"github.com/psyf8t/astinus/internal/image/layer"
@@ -142,34 +144,159 @@ func (s *stamper) applyAll(comps []model.Component) {
 	}
 }
 
-// apply stamps one component if any of its evidence locations match
-// a known path. The first matching location wins; we don't try to
-// reconcile conflicting locations because they would all live in
-// the same image and the latest layer rule already produces a
-// well-defined answer per location.
+// apply stamps one component if any of its locations resolves to a
+// known layer. Discovery falls through in priority order:
+//
+//  1. Component.Evidence.Locations vs the FileMap last-touch lookup
+//     (latest-layer-wins). Original behaviour.
+//  2. `Properties["syft:location:N:path"]` vs the FileMap. S4 Task 2 —
+//     Syft's apk/dpkg/rpm catalogers stamp the binary path on
+//     Properties rather than Evidence.Locations, so the original
+//     pass silently missed every package-managed row on real images.
+//  3. `Properties["syft:location:N:layerID"]` direct: when Syft
+//     recorded the layer digest itself (no FileMap probe needed),
+//     match it against the known layer list to pick up Index +
+//     CreatedBy and stamp `astinus:layer:source = syft-location-property`.
+//
+// The first matching path/layer wins; we don't try to reconcile
+// conflicting locations because the FileMap's latest-layer rule
+// already produces a well-defined answer per location.
 func (s *stamper) apply(c *model.Component) {
-	if c == nil || c.Evidence == nil || len(c.Evidence.Locations) == 0 {
+	if c == nil {
 		return
 	}
 	if c.LayerInfo != nil {
-		// Already attributed — preserve the existing entry. Honors
-		// the "non-destructive" contract from spec section 8.5.
+		// Already attributed (e.g. extractor enricher already set
+		// LayerInfo from buildinfo evidence). Honour the
+		// "non-destructive" contract from spec section 8.5; just
+		// stamp the source so consumers see where it came from.
+		ensureProp(c, model.PropertyLayerSource, "preexisting")
 		return
 	}
-	for _, loc := range c.Evidence.Locations {
-		if loc.Path == "" {
+
+	// 1) Evidence.Locations — original path.
+	if c.Evidence != nil {
+		for _, loc := range c.Evidence.Locations {
+			if info, ok := s.lookupPath(loc.Path); ok {
+				s.stampFromInfo(c, info, "filemap-last-touch")
+				return
+			}
+		}
+	}
+
+	// 2 + 3) Syft-property paths and direct layerID.
+	syftLocs := readSyftLocationProps(c.Properties)
+	for _, loc := range syftLocs {
+		if info, ok := s.lookupPath(loc.path); ok {
+			s.stampFromInfo(c, info, "syft-location-property")
+			return
+		}
+	}
+	for _, loc := range syftLocs {
+		if loc.layerID == "" {
 			continue
 		}
-		info, ok := s.fm.Lookup(loc.Path)
+		if info, ok := s.lookupLayerDigest(loc.layerID); ok {
+			s.stampFromInfo(c, info, "syft-location-property")
+			return
+		}
+	}
+}
+
+func (s *stamper) lookupPath(p string) (layer.Info, bool) {
+	if p == "" {
+		return layer.Info{}, false
+	}
+	return s.fm.Lookup(p)
+}
+
+// lookupLayerDigest scans the FileMap's layer descriptors for a
+// match against digest. Linear; the layer count is small (<32 for
+// production images).
+func (s *stamper) lookupLayerDigest(digest string) (layer.Info, bool) {
+	if s.fm == nil || digest == "" {
+		return layer.Info{}, false
+	}
+	for _, info := range s.fm.Layers() {
+		if info.Digest == digest {
+			return info, true
+		}
+	}
+	return layer.Info{}, false
+}
+
+func (s *stamper) stampFromInfo(c *model.Component, info layer.Info, source string) {
+	c.LayerInfo = &model.LayerInfo{
+		LayerDigest:    info.Digest,
+		LayerIndex:     info.Index,
+		DockerfileLine: "", // not derivable from history alone
+		AddedBy:        info.CreatedBy,
+	}
+	ensureProp(c, model.PropertyLayerSource, source)
+}
+
+// ensureProp inserts (key, value) into c.Properties without
+// overwriting a pre-existing entry. Used to stamp the layer:source
+// breadcrumb conservatively — a value already there came from an
+// upstream enricher and we trust it.
+func ensureProp(c *model.Component, key, value string) {
+	if c.Properties == nil {
+		c.Properties = map[string]string{}
+	}
+	if _, exists := c.Properties[key]; exists {
+		return
+	}
+	c.Properties[key] = value
+}
+
+// syftLocation pairs the Syft path + layerID for a single location
+// index N inside a Component's Properties.
+type syftLocation struct {
+	idx     string
+	path    string
+	layerID string
+}
+
+// readSyftLocationProps groups `syft:location:N:path` and
+// `syft:location:N:layerID` entries by their index N. Returns the
+// locations sorted by N (ascending) so two callers see the same
+// first-match order.
+func readSyftLocationProps(props map[string]string) []syftLocation {
+	if len(props) == 0 {
+		return nil
+	}
+	byIdx := map[string]*syftLocation{}
+	for k, v := range props {
+		if v == "" || !strings.HasPrefix(k, "syft:location:") {
+			continue
+		}
+		rest := strings.TrimPrefix(k, "syft:location:")
+		parts := strings.SplitN(rest, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		idx, key := parts[0], parts[1]
+		loc, ok := byIdx[idx]
 		if !ok {
+			loc = &syftLocation{idx: idx}
+			byIdx[idx] = loc
+		}
+		switch key {
+		case "path":
+			loc.path = v
+		case "layerID":
+			loc.layerID = v
+		}
+	}
+	out := make([]syftLocation, 0, len(byIdx))
+	for _, l := range byIdx {
+		if l.path == "" && l.layerID == "" {
+			// Annotations-only / unrelated keys grouped under an
+			// index but with nothing usable for attribution.
 			continue
 		}
-		c.LayerInfo = &model.LayerInfo{
-			LayerDigest:    info.Digest,
-			LayerIndex:     info.Index,
-			DockerfileLine: "", // not derivable from history alone
-			AddedBy:        info.CreatedBy,
-		}
-		return
+		out = append(out, *l)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].idx < out[j].idx })
+	return out
 }

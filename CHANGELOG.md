@@ -13,6 +13,18 @@ public CLI / output surface.
 
 ### Fixed
 
+- **Layer attribution now lands on Syft-tracked package
+  components.** Syft's apk / dpkg / rpm catalogers stamp the
+  binary path on `Properties["syft:location:N:path"]` (and the
+  layer digest on `syft:location:N:layerID`), not on
+  `Evidence.Locations`. The attribution enricher's stamper now
+  reads both sources after its existing Evidence.Locations
+  pass, plus a direct `layerID` → `FileMap.Layers()` match for
+  squashed/normalised image cases where the path lookup fails.
+  Real-image fallout: previously 0 / 573 ground-truth-matching
+  packages carried `astinus:layer:digest` on Grafana; the fix
+  unblocks coverage to the Task 7 acceptance threshold.
+  (ADR-0041, S4 Task 2.)
 - **Go module deps from buildinfo now reach the output SBOM on
   real production images.** The extractor enricher previously
   consulted only `Component.Evidence.Locations` to find binaries
@@ -38,6 +50,18 @@ public CLI / output surface.
   one-way type ratchet (`file` → `library`/`application`) keeps
   the merged Component on the strongest identity. (ADR-0040,
   S4 Task 1.)
+
+### Added
+
+- **`astinus:layer:source` component property** records which
+  discovery path produced the layer attribution:
+  `filemap-last-touch` (Evidence.Locations vs FileMap),
+  `syft-location-property` (translated from Syft's per-component
+  property bag), or `preexisting` (LayerInfo already set by an
+  upstream enricher like the Go-buildinfo path). Operators
+  building coverage dashboards can grep this property without
+  parsing every layer-property to learn provenance. (ADR-0041,
+  S4 Task 2.)
 
 ### Changed
 

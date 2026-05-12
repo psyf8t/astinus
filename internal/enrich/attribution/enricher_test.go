@@ -149,6 +149,140 @@ func TestAttributionPreservesExistingLayerInfo(t *testing.T) {
 	}
 }
 
+// TestAttributionStampsFromSyftLocationProperty — S4 Task 2: a
+// Component that came from Syft's apk / dpkg / rpm cataloger has its
+// path in `syft:location:N:path` Properties rather than in
+// `Evidence.Locations`. Attribution must follow the property and
+// produce LayerInfo just as if Evidence.Locations had been used.
+func TestAttributionStampsFromSyftLocationProperty(t *testing.T) {
+	img := buildImage(t, []map[string]string{
+		{"usr/bin/foo": "v1"},                         // layer 0
+		{"opt/app/jq": "binary", "etc/hostname": "h"}, // layer 1
+	})
+	sbom := &model.SBOM{
+		Components: []model.Component{{
+			BOMRef: "comp-jq",
+			Name:   "jq",
+			Properties: map[string]string{
+				"syft:location:0:path": "/opt/app/jq",
+			},
+		}},
+	}
+	bundle := image.NewBundle(mustTag(t, "test/x:1"), img, sbom)
+
+	if err := New().Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+
+	li := sbom.Components[0].LayerInfo
+	if li == nil || li.LayerIndex != 1 {
+		t.Fatalf("LayerInfo = %+v, want layer 1", li)
+	}
+	src := sbom.Components[0].Properties[model.PropertyLayerSource]
+	if src != "syft-location-property" {
+		t.Errorf("layer:source = %q, want syft-location-property", src)
+	}
+}
+
+// TestAttributionUsesSyftLayerIDDirect — S4 Task 2: when Syft also
+// recorded the layer digest itself in `syft:location:N:layerID`, the
+// stamper picks it up by digest match against the FileMap's layer
+// list. Used as a secondary fallback when the path doesn't resolve
+// in the FileMap (e.g. squashed image where the original layer
+// boundaries are gone but Syft still recorded them upstream).
+func TestAttributionUsesSyftLayerIDDirect(t *testing.T) {
+	img := buildImage(t, []map[string]string{
+		{"usr/bin/foo": "v1"}, // layer 0
+		{"opt/jq": "binary"},  // layer 1
+	})
+	layers, err := img.Layers()
+	if err != nil {
+		t.Fatalf("img.Layers: %v", err)
+	}
+	if len(layers) < 2 {
+		t.Fatalf("fixture only produced %d layers", len(layers))
+	}
+	layer1Digest, err := layers[1].Digest()
+	if err != nil {
+		t.Fatalf("layer digest: %v", err)
+	}
+
+	sbom := &model.SBOM{Components: []model.Component{{
+		BOMRef: "comp-jq",
+		Name:   "jq",
+		Properties: map[string]string{
+			"syft:location:0:path":    "/path/not/in/image",
+			"syft:location:0:layerID": layer1Digest.String(),
+		},
+	}}}
+	bundle := image.NewBundle(mustTag(t, "test/x:1"), img, sbom)
+
+	if err := New().Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	li := sbom.Components[0].LayerInfo
+	if li == nil || li.LayerIndex != 1 {
+		t.Fatalf("LayerInfo = %+v, want layer 1 via syft layerID", li)
+	}
+}
+
+// TestAttributionEvidenceLocationsBeatSyftProperties — S4 Task 2:
+// when both Evidence.Locations and `syft:location:*:path` resolve,
+// the canonical Evidence.Locations wins (consistent with the
+// pre-change behaviour for callers that mix the two).
+func TestAttributionEvidenceLocationsBeatSyftProperties(t *testing.T) {
+	img := buildImage(t, []map[string]string{
+		{"a": "1"}, // layer 0
+		{"b": "1"}, // layer 1
+	})
+	sbom := &model.SBOM{Components: []model.Component{{
+		Name: "x",
+		Evidence: &model.Evidence{Locations: []model.EvidenceLocation{
+			{Path: "a"}, // layer 0
+		}},
+		Properties: map[string]string{
+			"syft:location:0:path": "b", // layer 1
+		},
+	}}}
+	bundle := image.NewBundle(mustTag(t, "test/x:1"), img, sbom)
+	if err := New().Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if sbom.Components[0].LayerInfo.LayerIndex != 0 {
+		t.Errorf("expected layer 0 (Evidence.Locations wins); got %d",
+			sbom.Components[0].LayerInfo.LayerIndex)
+	}
+	if sbom.Components[0].Properties[model.PropertyLayerSource] != "filemap-last-touch" {
+		t.Errorf("layer:source = %q, want filemap-last-touch",
+			sbom.Components[0].Properties[model.PropertyLayerSource])
+	}
+}
+
+// TestReadSyftLocationProps_GroupsAndSorts pins the grouping logic —
+// properties from the same N coalesce into one syftLocation, and
+// distinct N's are returned in ascending order.
+func TestReadSyftLocationProps_GroupsAndSorts(t *testing.T) {
+	props := map[string]string{
+		"syft:location:0:path":         "/a",
+		"syft:location:0:layerID":      "sha256:layer0",
+		"syft:location:1:path":         "/b",
+		"syft:location:1:layerID":      "sha256:layer1",
+		"syft:location:2:annotations":  "ignored",
+		"unrelated":                    "skip",
+		"syft:location:malformed:path": "skip-malformed",
+	}
+	got := readSyftLocationProps(props)
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3 (0, 1, malformed); got %+v", len(got), got)
+	}
+	if got[0].idx != "0" || got[0].path != "/a" || got[0].layerID != "sha256:layer0" {
+		t.Errorf("got[0] = %+v", got[0])
+	}
+	if got[1].idx != "1" || got[1].path != "/b" || got[1].layerID != "sha256:layer1" {
+		t.Errorf("got[1] = %+v", got[1])
+	}
+}
+
 func TestAttributionRecursesIntoSubComponents(t *testing.T) {
 	img := buildImage(t, []map[string]string{{"opt/app/lib.jar": "x"}})
 	sbom := &model.SBOM{

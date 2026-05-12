@@ -24,6 +24,11 @@ const (
 	PropertyLayerIndex          = "astinus:layer:index"
 	PropertyLayerDockerfileLine = "astinus:layer:dockerfile-line"
 	PropertyLayerAddedBy        = "astinus:layer:added-by"
+	// PropertyLayerSource records which discovery path produced the
+	// layer attribution: a filesystem-walk last-touch lookup
+	// ("filemap-last-touch") or a translated Syft location
+	// ("syft-location-property"). S4 Task 2.
+	PropertyLayerSource = "astinus:layer:source"
 
 	// Provenance about how Astinus identified the component.
 	PropertyEvidenceMethod     = "astinus:evidence:method"
