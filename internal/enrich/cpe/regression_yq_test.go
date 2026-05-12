@@ -40,13 +40,19 @@ func (*fakeYqSource) Resolve(_ PURL) []Candidate {
 }
 
 // TestRegression_YqFalsePositivesNotInPrimary — end-to-end assertion
-// that the v0.2 benchmark bug is fixed: the Component for yq has
-// the legitimate yq:v4 CPE as its single primary, and the Linksys
-// router / auction-site CPEs DO NOT appear in c.CPEs nor in any
+// that the v0.2 benchmark bug stays fixed: the Linksys router /
+// auction-site CPEs DO NOT appear in c.CPEs nor in any
 // `astinus:cpe:alternative:N` slot. They land in the debug log only
 // (and, with --include-rejected-cpe, in `astinus:cpe:rejected:N`).
 //
-// This is the regression gate from the task spec.
+// S4 Task 3 update: yq is a `pkg:golang/...` module, and the golang
+// ecosystem policy is evidence-only — the legitimate yq:v4 CPE
+// surfaces in `astinus:cpe:evidence` instead of `c.CPEs[0]`, with
+// `astinus:cpe:scope=evidence-only` and a rationale property.
+// This change reduces the test's regression scope to the
+// false-positive-quarantine assertion (still the primary contract
+// of ADR-0029); the v-prefix / evidence-only path is exercised by
+// the policy-specific tests in policy_test.go.
 func TestRegression_YqFalsePositivesNotInPrimary(t *testing.T) {
 	sbom := &model.SBOM{Components: []model.Component{{
 		Name: "yq",
@@ -58,15 +64,22 @@ func TestRegression_YqFalsePositivesNotInPrimary(t *testing.T) {
 	}
 
 	c := sbom.Components[0]
-	if len(c.CPEs) != 1 {
-		t.Fatalf("primary CPE set should hold exactly one entry; got %v", c.CPEs)
+	// Golang ecosystem is evidence-only: c.CPEs must be empty.
+	if len(c.CPEs) != 0 {
+		t.Errorf("golang component primary CPEs should be empty under "+
+			"evidence-only policy; got %v", c.CPEs)
 	}
-	if !strings.Contains(c.CPEs[0], ":a:yq:v4:") {
-		t.Errorf("primary CPE = %q, want the legitimate yq:v4 entry", c.CPEs[0])
+	// The legitimate yq:v4 row should still surface — under evidence.
+	if ev := c.Properties["astinus:cpe:evidence"]; !strings.Contains(ev, ":a:yq:v4:") {
+		t.Errorf("evidence CPE = %q, want the legitimate yq:v4 entry", ev)
+	}
+	if scope := c.Properties["astinus:cpe:scope"]; scope != "evidence-only" {
+		t.Errorf("astinus:cpe:scope = %q, want evidence-only", scope)
 	}
 
 	// Ensure no false-positive CPE landed anywhere visible to a
-	// vulnerability scanner (cpe field, alternative properties).
+	// vulnerability scanner (primary cpe field, alternatives, or
+	// evidence).
 	forbidden := []string{
 		"linksys", "befw11s4", "miethner", "erotik", "auktionshaus",
 	}
@@ -78,15 +91,15 @@ func TestRegression_YqFalsePositivesNotInPrimary(t *testing.T) {
 		}
 	}
 	for k, v := range c.Properties {
-		if !strings.HasPrefix(k, "astinus:cpe:alternative:") {
-			continue
-		}
-		if strings.HasSuffix(k, ":source") || strings.HasSuffix(k, ":confidence") {
+		// astinus:cpe:source / :confidence / :rationale / :scope are
+		// metadata for the chosen primary, not additional CPE values
+		// — skip them in the forbidden-token sweep.
+		if !strings.Contains(v, "cpe:2.3:") {
 			continue
 		}
 		for _, bad := range forbidden {
 			if strings.Contains(v, bad) {
-				t.Errorf("forbidden token %q in alternative %s = %q", bad, k, v)
+				t.Errorf("forbidden token %q in property %s = %q", bad, k, v)
 			}
 		}
 	}

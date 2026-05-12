@@ -35,17 +35,26 @@ type Enricher struct {
 	chain           Resolver
 	threshold       Threshold
 	includeRejected bool
+	policies        map[string]*EcosystemPolicy
 }
 
 // New returns an Enricher with DefaultChain() and DefaultThreshold().
 func New() *Enricher {
-	return &Enricher{chain: DefaultChain(), threshold: DefaultThreshold()}
+	return &Enricher{
+		chain:     DefaultChain(),
+		threshold: DefaultThreshold(),
+		policies:  DefaultPolicies(),
+	}
 }
 
 // NewWithResolver returns an Enricher with the supplied resolver.
 // Useful for tests that want to drive a deterministic chain.
 func NewWithResolver(r Resolver) *Enricher {
-	return &Enricher{chain: r, threshold: DefaultThreshold()}
+	return &Enricher{
+		chain:     r,
+		threshold: DefaultThreshold(),
+		policies:  DefaultPolicies(),
+	}
 }
 
 // WithIncludeRejected toggles whether rejected candidates are written
@@ -60,6 +69,19 @@ func (e *Enricher) WithIncludeRejected(b bool) *Enricher {
 // when classifying candidates. Useful for policy-driven tuning.
 func (e *Enricher) WithThreshold(t Threshold) *Enricher {
 	e.threshold = t
+	return e
+}
+
+// WithPolicies overrides the per-ecosystem CPE policy table. Used by
+// tests and (eventually) by a `--cpe-policy` CLI surface to project
+// operator overrides on top of `DefaultPolicies()`. Pass nil to
+// restore the defaults. S4 Task 3.
+func (e *Enricher) WithPolicies(p map[string]*EcosystemPolicy) *Enricher {
+	if p == nil {
+		e.policies = DefaultPolicies()
+	} else {
+		e.policies = p
+	}
 	return e
 }
 
@@ -141,6 +163,12 @@ func (e *Enricher) enrichOne(c *model.Component, stats *enrichStats) {
 		stats.validated++
 	}
 
+	// Resolve the per-ecosystem CPE policy. PURL parse failure
+	// downgrades the row to the default policy (we still want
+	// classification + property writes to work).
+	purl, purlErr := ParsePURL(c.PURL)
+	policy := policyForEcosystem(e.policies, purl.Type)
+
 	if c.PURL == "" {
 		if !hadExisting {
 			stats.noPURL++
@@ -148,14 +176,13 @@ func (e *Enricher) enrichOne(c *model.Component, stats *enrichStats) {
 		}
 		// No PURL but pre-existing CPEs — apply classification on the
 		// existing ones alone.
-		e.writeResults(c, cands, stats)
+		e.writeResults(c, cands, stats, policy)
 		return
 	}
 
-	purl, err := ParsePURL(c.PURL)
-	if err != nil {
+	if purlErr != nil {
 		stats.purlError++
-		setProp(c, "astinus:cpe:purl-error", err.Error())
+		setProp(c, "astinus:cpe:purl-error", purlErr.Error())
 		return
 	}
 
@@ -167,7 +194,7 @@ func (e *Enricher) enrichOne(c *model.Component, stats *enrichStats) {
 		return
 	}
 
-	addedCPE := e.writeResults(c, cands, stats)
+	addedCPE := e.writeResults(c, cands, stats, policy)
 	if addedCPE {
 		stats.addedCPE++
 	}
@@ -210,35 +237,33 @@ func candidatesFromExistingCPEs(cpes []string) []Candidate {
 // writeResults runs Classify over cands and projects the result onto
 // the Component. Returns true when the Component picked up at least
 // one CPE that wasn't already present.
-func (e *Enricher) writeResults(c *model.Component, cands []Candidate, stats *enrichStats) bool {
+//
+// S4 Task 3 wires the per-ecosystem policy:
+//  1. NormalizeVersion rewrites every candidate's CPE version slot
+//     (Go modules drop the leading `v` to match NVD's `X.Y.Z` shape).
+//  2. RejectVendors drops candidates whose vendor segment matches a
+//     module-path TLD NVD never registers (`go.uber.org`, `k8s.io`,
+//     …). The rejected entries surface in the debug log so operators
+//     can audit, but they never reach classification.
+//  3. EvidenceOnly demotes the chosen primary from Component.CPEs to
+//     `astinus:cpe:evidence`, stamps `astinus:cpe:scope =
+//     evidence-only` plus a human-readable `astinus:cpe:rationale`.
+//     The scanner-facing CPE list stays empty (or unchanged from the
+//     input) so CPE-keyed vulnerability matching doesn't fire on
+//     coordinates the registry doesn't actually carry.
+func (e *Enricher) writeResults(c *model.Component, cands []Candidate, stats *enrichStats, policy *EcosystemPolicy) bool {
+	if policy == nil {
+		policy = policyForEcosystem(e.policies, "")
+	}
+
+	cands = applyPolicyToCandidates(c, cands, policy)
 	cands = DedupeCandidates(cands)
 	primary, alts, rejected := Classify(cands, e.threshold)
 
 	originalCPEs := append([]string(nil), c.CPEs...)
 	c.CPEs = nil
 
-	added := false
-	if primary != nil {
-		c.CPEs = []string{primary.CPE}
-		setProp(c, "astinus:cpe:source", string(primary.Source))
-		setProp(c, "astinus:cpe:confidence", formatConfidence(primary.Confidence))
-		if primary.Evidence != "" {
-			setProp(c, "astinus:cpe:evidence", primary.Evidence)
-		}
-		setValidationStamps(c, originalCPEs)
-		if !contains(originalCPEs, primary.CPE) {
-			added = true
-		}
-	} else if len(originalCPEs) > 0 {
-		// Nothing cleared the primary floor but we shouldn't drop
-		// the input CPEs silently — keep them so downstream consumers
-		// still see the data the operator started with.
-		c.CPEs = originalCPEs
-		setValidationStamps(c, originalCPEs)
-		setProp(c, "astinus:cpe:lookup", "no-primary-above-threshold")
-	} else {
-		setProp(c, "astinus:cpe:lookup", "no-match")
-	}
+	added := writePrimary(c, primary, originalCPEs, policy)
 
 	for i, alt := range alts {
 		idx := i + 1
@@ -347,4 +372,89 @@ func setProp(c *model.Component, key, value string) {
 		c.Properties = map[string]string{}
 	}
 	c.Properties[key] = value
+}
+
+// applyPolicyToCandidates runs the ecosystem policy's pre-classify
+// passes: version normalisation (NormalizeVersion) and vendor
+// rejection (RejectVendors). Returns the filtered slice; the
+// original is untouched. S4 Task 3.
+func applyPolicyToCandidates(c *model.Component, cands []Candidate, policy *EcosystemPolicy) []Candidate {
+	if policy.NormalizeVersion != nil {
+		for i := range cands {
+			cands[i].CPE = applyVersionNormalization(cands[i].CPE, policy.NormalizeVersion)
+		}
+	}
+	if len(policy.RejectVendors) > 0 {
+		cands = filterRejectedVendors(c, cands, policy.RejectVendors)
+	}
+	return cands
+}
+
+// writePrimary projects the chosen primary candidate onto the
+// Component according to the ecosystem policy. Returns true when the
+// row picked up a primary CPE the input didn't already carry.
+// Extracted from writeResults to keep cognitive complexity under
+// the linter budget. S4 Task 3.
+func writePrimary(c *model.Component, primary *Candidate, originalCPEs []string, policy *EcosystemPolicy) bool {
+	switch {
+	case primary != nil && policy.EmitPrimary:
+		c.CPEs = []string{primary.CPE}
+		setProp(c, "astinus:cpe:source", string(primary.Source))
+		setProp(c, "astinus:cpe:confidence", formatConfidence(primary.Confidence))
+		if primary.Evidence != "" {
+			setProp(c, "astinus:cpe:evidence", primary.Evidence)
+		}
+		setValidationStamps(c, originalCPEs)
+		return !contains(originalCPEs, primary.CPE)
+
+	case primary != nil:
+		// Evidence-only path: never expose to Component.CPEs (scanner-
+		// facing). Preserve the candidate so auditors and operator
+		// tooling can see what the resolver picked.
+		c.CPEs = nil
+		setProp(c, "astinus:cpe:evidence", primary.CPE)
+		setProp(c, "astinus:cpe:source", string(primary.Source))
+		setProp(c, "astinus:cpe:confidence", formatConfidence(primary.Confidence))
+		setProp(c, "astinus:cpe:scope", "evidence-only")
+		if policy.Rationale != "" {
+			setProp(c, "astinus:cpe:rationale", policy.Rationale)
+		}
+		setValidationStamps(c, originalCPEs)
+		return false
+
+	case len(originalCPEs) > 0:
+		// Nothing cleared the primary floor but we shouldn't drop the
+		// input CPEs silently — keep them so downstream consumers still
+		// see the data the operator started with.
+		c.CPEs = originalCPEs
+		setValidationStamps(c, originalCPEs)
+		setProp(c, "astinus:cpe:lookup", "no-primary-above-threshold")
+		return false
+
+	default:
+		setProp(c, "astinus:cpe:lookup", "no-match")
+		return false
+	}
+}
+
+// filterRejectedVendors drops Candidates whose CPE vendor segment
+// matches one of the policy's RejectVendors entries. Surfaced via a
+// per-component debug log so operators can audit. S4 Task 3.
+func filterRejectedVendors(c *model.Component, cands []Candidate, reject []string) []Candidate {
+	if len(cands) == 0 || len(reject) == 0 {
+		return cands
+	}
+	out := make([]Candidate, 0, len(cands))
+	for _, cand := range cands {
+		vendor := cpeVendor(cand.CPE)
+		if vendor != "" && matchesAnyVendor(vendor, reject) {
+			slog.Default().Debug("cpe.rejected.by-policy",
+				"component", c.Name,
+				"cpe", cand.CPE,
+				"vendor", vendor)
+			continue
+		}
+		out = append(out, cand)
+	}
+	return out
 }

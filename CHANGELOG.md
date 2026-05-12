@@ -13,6 +13,34 @@ public CLI / output surface.
 
 ### Fixed
 
+- **Go-module CPEs no longer create misleading scanner match
+  surface.** A real-image audit found 0/10 sampled Go-module CPEs
+  matched anything in NVD: the vendor names (`go.uber.org`,
+  `k8s.io`, `gopkg.in`, `cel.dev`, `modernc.org`, …) are
+  module-path TLDs NVD does not register, and 77 % carried a
+  `:vX.Y.Z:` version where NVD's CPE dictionary stores `:X.Y.Z:`.
+  The new per-ecosystem CPE policy strips the `v` prefix on Go
+  rows and demotes the row's primary CPE to
+  `astinus:cpe:evidence` plus `astinus:cpe:scope = evidence-only`
+  and a rationale property. The candidate stays in the SBOM for
+  audit but no longer expands the scanner's match surface with
+  un-indexable coordinates. npm / pypi / maven / deb / rpm / apk
+  rows are unchanged. (ADR-0042, S4 Task 3.)
+
+### Added
+
+- **`internal/enrich/cpe/policy.go` — per-ecosystem CPE policy.**
+  `EcosystemPolicy{EmitPrimary, EvidenceOnly, NormalizeVersion,
+  RejectVendors, Rationale}` data table consumed by the CPE
+  enricher's `writeResults`. `DefaultPolicies()` ships the
+  Grafana-audit-driven defaults (`golang` evidence-only with a
+  hand-curated RejectVendors list; everything else primary).
+  Operator overrides via the new `Enricher.WithPolicies` hook;
+  a CLI `--cpe-policy <file>` surface is deferred to a
+  follow-up. (ADR-0042, S4 Task 3.)
+
+### Fixed
+
 - **Layer attribution now lands on Syft-tracked package
   components.** Syft's apk / dpkg / rpm catalogers stamp the
   binary path on `Properties["syft:location:N:path"]` (and the
