@@ -3,6 +3,7 @@ package extractor
 import (
 	"bytes"
 	"context"
+	"strings"
 
 	"github.com/psyf8t/astinus/internal/fingerprint"
 )
@@ -34,6 +35,19 @@ func (*GoExtractor) Match(_ context.Context, file File) bool {
 // A non-Go binary returns (empty, nil) — buildinfo.Read errors out
 // when the .go.buildinfo section is absent, and we map that to "no
 // match" rather than a hard failure.
+//
+// S4 Task 1: version handling is now version-aware:
+//   - `(devel)` is preserved verbatim on the Component (real Go
+//     toolchain marker for an in-tree build) and rendered as
+//     `?vcs_ref=devel` PURL qualifier so vulnerability scanners
+//     skip the row instead of treating it as version "(devel)".
+//   - the leading `v` is stripped from the Component's Version field
+//     to keep CycloneDX downstream consumers consistent with how
+//     they treat other ecosystems; the PURL keeps the `v` because
+//     the Go module proxy and the purl-spec golang type require it
+//     (pkg:golang/<path>@v1.2.3).
+//   - `+incompatible` suffixes are preserved (they're part of the
+//     module version per the Go module conventions).
 func (*GoExtractor) Extract(_ context.Context, file File) (Identity, error) {
 	bi, err := fingerprint.ReadGoBuildInfo(bytes.NewReader(file.Body))
 	if err != nil {
@@ -45,7 +59,7 @@ func (*GoExtractor) Extract(_ context.Context, file File) (Identity, error) {
 
 	id := Identity{
 		Name:    bi.Main.Path,
-		Version: bi.Main.Version,
+		Version: cleanGoVersion(bi.Main.Version),
 		PURL:    purlGolang(bi.Main.Path, bi.Main.Version),
 		Properties: map[string]string{
 			"go.compiler":     bi.GoVersion,
@@ -59,25 +73,52 @@ func (*GoExtractor) Extract(_ context.Context, file File) (Identity, error) {
 		}
 		id.SubComponents = append(id.SubComponents, Identity{
 			Name:    dep.Path,
-			Version: dep.Version,
+			Version: cleanGoVersion(dep.Version),
 			PURL:    purlGolang(dep.Path, dep.Version),
 		})
 	}
 	return id, nil
 }
 
-// purlGolang renders a Go module PURL with the conventional fallback:
-// missing version → `@unknown` so consumers don't see a bare `pkg:`
-// prefix.
+// cleanGoVersion projects a Go-toolchain version string to the form
+// CycloneDX consumers expect on the Component.Version field. S4
+// Task 1:
+//   - "(devel)"   → "(devel)"    preserved marker
+//   - ""          → ""           caller's choice (we never invent one)
+//   - "v1.2.3"    → "1.2.3"      strip the leading v
+//   - "v0.0.0-20231212003515-deadbeefcafe"
+//     → "0.0.0-20231212003515-deadbeefcafe"   pseudo-version
+//   - "v1.2.3+incompatible"
+//     → "1.2.3+incompatible"  suffix preserved
+func cleanGoVersion(v string) string {
+	if v == "(devel)" || v == "" {
+		return v
+	}
+	return strings.TrimPrefix(v, "v")
+}
+
+// purlGolang renders a Go module PURL. The `pkg:golang/` type per
+// the purl-spec keeps the `v` prefix on tagged releases and the full
+// `0.0.0-<timestamp>-<sha>` pseudo-version; we only intervene on the
+// `(devel)` marker (no resolvable version → carry the signal in a
+// `?vcs_ref=devel` qualifier so vulnerability scanners skip the row)
+// and on empty version (`@unknown` fallback so consumers don't see a
+// bare `pkg:golang/<path>` shape they can't parse).
+//
+// Module paths can contain `/` separators (`github.com/spf13/cobra`)
+// which the purl-spec preserves literally — no escaping needed.
 func purlGolang(modulePath, version string) string {
 	if modulePath == "" {
 		return ""
 	}
-	v := version
-	if v == "" {
-		v = "unknown"
+	switch version {
+	case "":
+		return "pkg:golang/" + modulePath + "@unknown"
+	case "(devel)":
+		return "pkg:golang/" + modulePath + "?vcs_ref=devel"
+	default:
+		return "pkg:golang/" + modulePath + "@" + version
 	}
-	return "pkg:golang/" + modulePath + "@" + v
 }
 
 // looksLikeBinary reports whether body's first bytes match a known

@@ -781,18 +781,51 @@ func applyExtractorIdentity(c *model.Component, id extractor.Identity) {
 		c.Properties[k] = v
 	}
 	for _, sub := range id.SubComponents {
-		c.SubComponents = append(c.SubComponents, identityToSubComponent(sub))
+		c.SubComponents = append(c.SubComponents, identityToSubComponent(sub, id.Source))
 	}
 }
 
 // identityToSubComponent renders a SubComponent for nested
-// dependencies (Go module deps, Rust crate deps).
-func identityToSubComponent(id extractor.Identity) model.Component {
+// dependencies (Go module deps, Rust crate deps). S4 Task 1 stamps
+// the same identity markers the extractor enricher uses when
+// attaching deps to a Syft-discovered binary, so the lift phase sees
+// a consistent shape regardless of which discovery path produced the
+// SubComponent.
+func identityToSubComponent(id extractor.Identity, parentSource string) model.Component {
+	src := parentSource
+	if src == "" {
+		src = id.Source
+	}
 	return model.Component{
 		Type:    model.ComponentTypeLibrary,
 		Name:    id.Name,
 		Version: id.Version,
 		PURL:    id.PURL,
+		Properties: map[string]string{
+			model.PropertyEvidenceLevel: string(model.EvidenceLevelIdentified),
+			"astinus:identified:source": identifiedSourceName(src),
+		},
+	}
+}
+
+// identifiedSourceName mirrors extractor.identifiedSource — the
+// untracked enricher cannot import the extractor enricher (cycle), so
+// we duplicate the small mapping table here. Sources stay in lockstep
+// because both enrichers stamp the same Component identity property.
+func identifiedSourceName(extractorName string) string {
+	switch extractorName {
+	case "go":
+		return "go-buildinfo"
+	case "rust":
+		return "rust-auditable"
+	case "java":
+		return "java-jar-metadata"
+	case "python":
+		return "python-dist-info"
+	case "elf-library":
+		return "elf-soname"
+	default:
+		return extractorName
 	}
 }
 

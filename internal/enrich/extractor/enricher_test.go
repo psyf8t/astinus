@@ -199,15 +199,37 @@ func TestEnrichWalksImageAndExtractsGoBinary(t *testing.T) {
 
 	for _, want := range depImports {
 		found := false
-		for _, c := range sbom.Components {
+		var depComp *model.Component
+		for i := range sbom.Components {
+			c := &sbom.Components[i]
 			if strings.HasPrefix(c.PURL, "pkg:golang/"+want) {
 				found = true
+				depComp = c
 				break
 			}
 		}
 		if !found {
 			t.Errorf("expected extracted dep %q not found; components = %v",
 				want, componentNames(sbom))
+			continue
+		}
+		// S4 Task 1: each lifted Go module must carry the identity
+		// stamps so dedup / policy / SARIF passes can tell apart
+		// buildinfo-grounded rows from observed file rows.
+		if depComp.Properties[model.PropertyEvidenceLevel] != string(model.EvidenceLevelIdentified) {
+			t.Errorf("%s evidence-level = %q, want identified",
+				want, depComp.Properties[model.PropertyEvidenceLevel])
+		}
+		if depComp.Properties["astinus:identified:source"] != "go-buildinfo" {
+			t.Errorf("%s identified:source = %q, want go-buildinfo",
+				want, depComp.Properties["astinus:identified:source"])
+		}
+		// Version field on the Component carries the v-prefix-stripped
+		// form; the PURL keeps the v-prefix per the purl-spec golang
+		// type.
+		if strings.HasPrefix(depComp.Version, "v") {
+			t.Errorf("%s Version = %q, must not retain v-prefix",
+				want, depComp.Version)
 		}
 	}
 
@@ -215,6 +237,61 @@ func TestEnrichWalksImageAndExtractsGoBinary(t *testing.T) {
 	edges := edgesFrom(sbom, "tester@1.0")
 	if len(edges) == 0 {
 		t.Errorf("no depends-on edges from tester; rels = %+v", sbom.Relationships)
+	}
+}
+
+// TestEnrichWalksSyftLocationPaths — Syft's apk/dpkg/rpm catalogers
+// stamp the binary's path in `syft:location:N:path` properties, not
+// in Evidence.Locations. The extractor enricher must consult both so
+// real-image package-manager-tracked Go binaries (Grafana, dive, yq
+// under apk) get their embedded modules extracted. S4 Task 1.
+func TestEnrichWalksSyftLocationPaths(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires `go build`; skipped in -short")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("test scaffold builds an ELF; skipped on windows")
+	}
+
+	binPath, depImports := buildGoBinaryWithDeps(t)
+	binBody, err := os.ReadFile(binPath) //nolint:gosec
+	if err != nil {
+		t.Fatalf("read built binary: %v", err)
+	}
+
+	const inImagePath = "usr/local/bin/tester"
+	img := buildImage(t, map[string][]byte{inImagePath: binBody})
+
+	// The owning Component records the binary path ONLY in
+	// `syft:location:0:path`, not in Evidence.Locations — exactly the
+	// shape Syft's apk cataloger produces for a package-managed
+	// binary.
+	sbom := &model.SBOM{Components: []model.Component{{
+		BOMRef: "tester@1.0",
+		Name:   "tester",
+		Type:   model.ComponentTypeApplication,
+		Properties: map[string]string{
+			"syft:location:0:path": "/" + inImagePath,
+		},
+	}}}
+	bundle := image.NewBundle(name.MustParseReference("test:latest"), img, sbom)
+
+	if err := New().Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+
+	for _, want := range depImports {
+		found := false
+		for _, c := range sbom.Components {
+			if strings.HasPrefix(c.PURL, "pkg:golang/"+want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("dep %q not extracted via syft:location path; components = %v",
+				want, componentNames(sbom))
+		}
 	}
 }
 
@@ -318,12 +395,38 @@ func TestAttachExtractedDeps_SkipsDuplicatesByPURL(t *testing.T) {
 				PURL: "pkg:golang/github.com/spf13/cobra@v1.8.0", Version: "v1.8.0"},
 		},
 	}
-	attachExtractedDeps(c, id)
+	attachExtractedDeps(c, id, "usr/local/bin/tester")
 	if len(c.SubComponents) != 2 {
 		t.Errorf("SubComponents = %d, want 2 (logrus dedup + cobra appended)", len(c.SubComponents))
 	}
 	if c.Properties["astinus:extractor:source"] != "go" {
 		t.Errorf("source stamp not written: %v", c.Properties)
+	}
+	// S4 Task 1: newly attached SubComponent must carry the identity
+	// stamps. The pre-existing logrus subcomponent (which already had
+	// matching PURL) is skipped before reaching the stamping path —
+	// only cobra picks up the new properties here.
+	var cobra *model.Component
+	for i := range c.SubComponents {
+		if c.SubComponents[i].Name == "github.com/spf13/cobra" {
+			cobra = &c.SubComponents[i]
+			break
+		}
+	}
+	if cobra == nil {
+		t.Fatalf("cobra SubComponent missing")
+	}
+	if cobra.Properties[model.PropertyEvidenceLevel] != string(model.EvidenceLevelIdentified) {
+		t.Errorf("cobra evidence-level = %q, want identified",
+			cobra.Properties[model.PropertyEvidenceLevel])
+	}
+	if cobra.Properties["astinus:identified:source"] != "go-buildinfo" {
+		t.Errorf("cobra identified:source = %q, want go-buildinfo",
+			cobra.Properties["astinus:identified:source"])
+	}
+	if cobra.Properties["astinus:extractor:embedded-in-path"] != "usr/local/bin/tester" {
+		t.Errorf("cobra embedded-in-path = %q",
+			cobra.Properties["astinus:extractor:embedded-in-path"])
 	}
 }
 

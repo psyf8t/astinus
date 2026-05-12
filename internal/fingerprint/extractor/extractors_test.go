@@ -129,6 +129,51 @@ func TestGoExtractorReturnsEmptyForBareELF(t *testing.T) {
 	}
 }
 
+// S4 Task 1: Go module versions on the Component.Version field must
+// have the leading `v` stripped (purl-spec golang type still requires
+// `v` on the PURL, but every other ecosystem in the SBOM lists
+// Version unprefixed and downstream tooling expects consistency).
+// `(devel)` is preserved verbatim as a marker. Pseudo-versions and
+// `+incompatible` suffixes are preserved verbatim after the `v`
+// strip.
+func TestCleanGoVersion(t *testing.T) {
+	cases := map[string]string{
+		"":                                       "",
+		"(devel)":                                "(devel)",
+		"v1.2.3":                                 "1.2.3",
+		"v0.0.0-20231212003515-deadbeefcafe1234": "0.0.0-20231212003515-deadbeefcafe1234",
+		"v28.5.2+incompatible":                   "28.5.2+incompatible",
+		"v1.20.0-rc.3":                           "1.20.0-rc.3",
+	}
+	for in, want := range cases {
+		if got := cleanGoVersion(in); got != want {
+			t.Errorf("cleanGoVersion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// S4 Task 1: the PURL keeps the toolchain-shape version on tagged
+// releases (purl-spec golang type), routes the `(devel)` marker into
+// a `?vcs_ref=devel` qualifier so vulnerability scanners skip the
+// row instead of treating "(devel)" as a version literal, and falls
+// back to `@unknown` for empty inputs.
+func TestPurlGolang(t *testing.T) {
+	cases := []struct {
+		modulePath, version, want string
+	}{
+		{"github.com/spf13/cobra", "v1.8.0", "pkg:golang/github.com/spf13/cobra@v1.8.0"},
+		{"github.com/spf13/cobra", "", "pkg:golang/github.com/spf13/cobra@unknown"},
+		{"example.com/local", "(devel)", "pkg:golang/example.com/local?vcs_ref=devel"},
+		{"", "v1.0.0", ""},
+	}
+	for _, c := range cases {
+		if got := purlGolang(c.modulePath, c.version); got != c.want {
+			t.Errorf("purlGolang(%q, %q) = %q, want %q",
+				c.modulePath, c.version, got, c.want)
+		}
+	}
+}
+
 // ─── ELF extractor ──────────────────────────────────────────────────
 
 func TestELFExtractorRejectsNonELF(t *testing.T) {

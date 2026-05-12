@@ -235,6 +235,13 @@ func pickPrimary(comps []model.Component, idxs []int) int {
 // primaryScore is a small integer that captures "how strong is this
 // component as a primary candidate." Higher beats lower. The exact
 // values don't matter; only the ordering does.
+//
+// S4 Task 1 adds the `evidence-level = identified` bump so a
+// buildinfo-grounded Go module wins primary against a parallel
+// `type = file` Syft row pointing at the same package coordinates.
+// Without this, the file row's missing PURL still produces a tie at
+// the PURL band when both have one, and the wrong row could be
+// picked as primary by original-index tiebreak.
 func primaryScore(c *model.Component) int {
 	score := 0
 	if c.PURL != "" {
@@ -246,6 +253,14 @@ func primaryScore(c *model.Component) int {
 	if c.Evidence != nil {
 		score += len(c.Evidence.Locations)
 	}
+	if c.Properties[model.PropertyEvidenceLevel] == string(model.EvidenceLevelIdentified) {
+		score += 50
+	}
+	// A `file` typed row is the weakest signal of identity; prefer
+	// any row that has been classified more precisely.
+	if c.Type != "" && c.Type != model.ComponentTypeFile {
+		score += 5
+	}
 	return score
 }
 
@@ -253,8 +268,19 @@ func primaryScore(c *model.Component) int {
 // secondary's evidence, properties, hashes, licenses, and CPEs.
 // On conflicts the primary's value wins (with secondary surfaced as
 // a property breadcrumb when interesting).
+//
+// S4 Task 1: when the primary's Type is the weak `file` and the
+// secondary carries a more-precise Type (library / application),
+// the merge upgrades. This keeps a Syft `file`-typed apk row from
+// silently masking a go-buildinfo `library`-typed row that happens
+// to share the same PURL.
 func mergePair(primary, secondary model.Component) model.Component {
 	out := primary
+
+	if out.Type == model.ComponentTypeFile && secondary.Type != "" &&
+		secondary.Type != model.ComponentTypeFile {
+		out.Type = secondary.Type
+	}
 
 	// Locations: union (dedup by path).
 	out.Evidence = mergeEvidence(primary.Evidence, secondary.Evidence)

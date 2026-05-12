@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"path"
+	"strings"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
@@ -136,7 +137,7 @@ func (e *Enricher) extractFromImage(ctx context.Context, sbom *model.SBOM, img v
 		stats.depsExtracted += len(id.SubComponents)
 
 		for _, owner := range owners {
-			attachExtractedDeps(owner, id)
+			attachExtractedDeps(owner, id, fe.Path)
 		}
 		return nil
 	}
@@ -148,30 +149,76 @@ func (e *Enricher) extractFromImage(ctx context.Context, sbom *model.SBOM, img v
 }
 
 // indexPathsToComponents returns a map from file path → every
-// Component that listed that path in Evidence.Locations. A binary
-// reused across two SBOM entries (rare but possible) will have both
-// owners attached when we encounter the file.
+// Component that listed that path. Reads both the canonical
+// `Evidence.Locations` AND Syft's `syft:location:N:path` properties:
+// Syft's apk / dpkg / rpm catalogers stamp the binary's path on
+// Properties, not Evidence, so a registry-walk that only consulted
+// Evidence.Locations missed every binary inside a package-managed
+// row on real images. S4 Task 1.
+//
+// A binary reused across two SBOM entries (rare but possible) will
+// have both owners attached when we encounter the file.
 func indexPathsToComponents(sbom *model.SBOM) map[string][]*model.Component {
 	out := map[string][]*model.Component{}
 	walkComponents(sbom.Components, func(c *model.Component) {
-		if c.Evidence == nil {
-			return
-		}
-		for _, loc := range c.Evidence.Locations {
-			p := normalizePath(loc.Path)
-			if p == "" {
-				continue
-			}
+		for _, p := range knownPathsForComponent(c) {
 			out[p] = append(out[p], c)
 		}
 	})
 	return out
 }
 
+// knownPathsForComponent collects every file path the Component
+// references, normalising leading slashes away. Returns paths in
+// declaration order (Evidence.Locations first, then Properties)
+// without deduping — `indexPathsToComponents` handles duplicates by
+// design (one owner per appearance).
+func knownPathsForComponent(c *model.Component) []string {
+	if c == nil {
+		return nil
+	}
+	var out []string
+	out = appendEvidencePaths(out, c.Evidence)
+	out = appendSyftLocationPaths(out, c.Properties)
+	return out
+}
+
+func appendEvidencePaths(out []string, e *model.Evidence) []string {
+	if e == nil {
+		return out
+	}
+	for _, loc := range e.Locations {
+		if p := normalizePath(loc.Path); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func appendSyftLocationPaths(out []string, props map[string]string) []string {
+	for k, v := range props {
+		if v == "" {
+			continue
+		}
+		// "syft:location:0:path", "syft:location:1:path", …
+		if !strings.HasPrefix(k, "syft:location:") || !strings.HasSuffix(k, ":path") {
+			continue
+		}
+		if p := normalizePath(v); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // attachExtractedDeps merges an Identity's SubComponents onto a
 // Component without duplicating ones already present (PURL-keyed).
-// The lift phase later promotes them to top-level.
-func attachExtractedDeps(c *model.Component, id fpextractor.Identity) {
+// The lift phase later promotes them to top-level. Each attached
+// SubComponent carries the source extractor (`astinus:identified:source`)
+// and an `astinus:evidence-level=identified` stamp so dedup and
+// downstream policy passes can tell apart buildinfo-grounded rows
+// from observed file rows. S4 Task 1.
+func attachExtractedDeps(c *model.Component, id fpextractor.Identity, fromPath string) {
 	if c == nil {
 		return
 	}
@@ -194,15 +241,43 @@ func attachExtractedDeps(c *model.Component, id fpextractor.Identity) {
 		if dep.PURL != "" && known[dep.PURL] {
 			continue
 		}
-		c.SubComponents = append(c.SubComponents, model.Component{
+		sub := model.Component{
 			Type:    model.ComponentTypeLibrary,
 			Name:    dep.Name,
 			Version: dep.Version,
 			PURL:    dep.PURL,
-		})
+			Properties: map[string]string{
+				model.PropertyEvidenceLevel:          string(model.EvidenceLevelIdentified),
+				"astinus:identified:source":          identifiedSource(id.Source),
+				"astinus:extractor:embedded-in-path": fromPath,
+			},
+		}
+		c.SubComponents = append(c.SubComponents, sub)
 		if dep.PURL != "" {
 			known[dep.PURL] = true
 		}
+	}
+}
+
+// identifiedSource maps the multi-modal extractor's Source name to
+// the value we stamp on the Component as
+// `astinus:identified:source`. The Go extractor emits "go" today; we
+// project that to "go-buildinfo" to make the provenance unambiguous
+// for SBOM consumers. Other sources pass through verbatim.
+func identifiedSource(extractorName string) string {
+	switch extractorName {
+	case "go":
+		return "go-buildinfo"
+	case "rust":
+		return "rust-auditable"
+	case "java":
+		return "java-jar-metadata"
+	case "python":
+		return "python-dist-info"
+	case "elf-library":
+		return "elf-soname"
+	default:
+		return extractorName
 	}
 }
 

@@ -11,6 +11,53 @@ public CLI / output surface.
 
 ## Unreleased
 
+### Fixed
+
+- **Go module deps from buildinfo now reach the output SBOM on
+  real production images.** The extractor enricher previously
+  consulted only `Component.Evidence.Locations` to find binaries
+  to walk; Syft's apk / dpkg / rpm catalogers stamp the binary
+  path on `Properties["syft:location:N:path"]` instead, so the
+  extractor walk silently skipped every package-managed Go
+  binary. Real-image fallout: 0 Go modules added on top of Syft
+  on a Grafana image with 547 embedded module records. Fix:
+  `knownPathsForComponent` now harvests both shapes, matching
+  the untracked enricher's known-paths skip-filter (ADR-0040,
+  S4 Task 1).
+- **`(devel)` Go module versions no longer trigger every-CVE
+  false-positives in downstream scanners.** The PURL renderer now
+  emits `pkg:golang/<path>?vcs_ref=devel` for in-tree builds,
+  carrying the "no resolvable version" signal in a PURL-spec
+  qualifier instead of as a literal `@(devel)` version. (ADR-0040,
+  S4 Task 1.)
+- **Dedup primary-pick respects evidence level.** A
+  buildinfo-grounded `type=library` row at PURL `pkg:golang/x@v1`
+  no longer loses to a Syft `type=file` row at the same PURL when
+  both appear in the SBOM. New scoring band (+50 for
+  `evidence-level = identified`, +5 for non-`file` types) plus a
+  one-way type ratchet (`file` → `library`/`application`) keeps
+  the merged Component on the strongest identity. (ADR-0040,
+  S4 Task 1.)
+
+### Changed
+
+- **Go module `Component.Version` no longer carries the `v`
+  prefix.** Tagged releases stored as `1.2.3`, pseudo-versions as
+  `0.0.0-20231212003515-deadbeefcafe`, `+incompatible` suffixes
+  preserved verbatim. The PURL keeps the `v` prefix because the
+  purl-spec golang type and the Go module proxy both require it.
+  Operators with `version >= X` policy expressions can now write
+  them against Go rows without a Go-aware comparator. (ADR-0040,
+  S4 Task 1.)
+- **Lifted SubComponents (Go modules, Rust crates, Java
+  manifests, Python dist-info, ELF SONAMEs) carry identity
+  provenance stamps.** Every lifted dep now records
+  `astinus:evidence-level = identified`, `astinus:identified:source
+  = go-buildinfo` (or the equivalent per source), and
+  `astinus:extractor:embedded-in-path = <full path>` so
+  forensic queries on the SBOM don't require walking the
+  relationships graph. (ADR-0040, S4 Task 1.)
+
 ### Removed
 
 - **Filename-only identity heuristics in the untracked enricher.**

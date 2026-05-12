@@ -239,3 +239,76 @@ func TestEnrich_NilSBOMReturnsError(t *testing.T) {
 		t.Fatal("expected error on nil sbom")
 	}
 }
+
+// TestRun_GoBuildinfoBeatsSyftFileRowOnSamePURL — S4 Task 1. A
+// buildinfo-grounded library row and a Syft `type=file` row land
+// in the SBOM with the same Go module PURL. dedup must pick the
+// identified row as primary and merge the file row's Properties on
+// top of it, NOT the other way around — otherwise the surviving
+// Component has Type=file and downstream scanners (Grype, OSV) skip
+// it. The merged row keeps Type=library, evidence-level=identified,
+// and absorbs the syft:location:* breadcrumbs.
+func TestRun_GoBuildinfoBeatsSyftFileRowOnSamePURL(t *testing.T) {
+	purl := "pkg:golang/github.com/sirupsen/logrus@v1.9.3"
+	in := []model.Component{
+		// Syft `file`-typed row first (lower original index — would
+		// win the tiebreak under the old scoring).
+		{
+			Name:    "github.com/sirupsen/logrus",
+			Version: "v1.9.3",
+			PURL:    purl,
+			Type:    model.ComponentTypeFile,
+			Properties: map[string]string{
+				"syft:location:0:path": "/usr/lib/grafana/bin/grafana",
+			},
+		},
+		// Buildinfo-grounded row second.
+		{
+			Name:    "github.com/sirupsen/logrus",
+			Version: "1.9.3",
+			PURL:    purl,
+			Type:    model.ComponentTypeLibrary,
+			Properties: map[string]string{
+				model.PropertyEvidenceLevel: string(model.EvidenceLevelIdentified),
+				"astinus:identified:source": "go-buildinfo",
+			},
+		},
+	}
+	out, merged := Run(in)
+	if len(out) != 1 || merged != 1 {
+		t.Fatalf("len(out)=%d merged=%d, want 1+1", len(out), merged)
+	}
+	got := out[0]
+	if got.Type != model.ComponentTypeLibrary {
+		t.Errorf("Type = %v, want library (file row must not win)", got.Type)
+	}
+	if got.Properties[model.PropertyEvidenceLevel] != string(model.EvidenceLevelIdentified) {
+		t.Errorf("evidence-level = %q, want identified",
+			got.Properties[model.PropertyEvidenceLevel])
+	}
+	if got.Properties["astinus:identified:source"] != "go-buildinfo" {
+		t.Errorf("identified:source = %q, want go-buildinfo",
+			got.Properties["astinus:identified:source"])
+	}
+	// The syft breadcrumb survives the merge.
+	if got.Properties["syft:location:0:path"] == "" {
+		t.Errorf("syft:location breadcrumb lost in merge: %v", got.Properties)
+	}
+}
+
+// TestMergePair_FileTypeUpgradedFromSecondary — when both rows have
+// the same dedup key but the primary's Type is `file` and the
+// secondary's is a more-precise type, the merge lifts to the
+// stronger type. S4 Task 1.
+func TestMergePair_FileTypeUpgradedFromSecondary(t *testing.T) {
+	primary := model.Component{
+		Name: "x", PURL: "pkg:golang/x@v1", Type: model.ComponentTypeFile,
+	}
+	secondary := model.Component{
+		Name: "x", PURL: "pkg:golang/x@v1", Type: model.ComponentTypeLibrary,
+	}
+	out := mergePair(primary, secondary)
+	if out.Type != model.ComponentTypeLibrary {
+		t.Errorf("Type = %v, want library", out.Type)
+	}
+}
