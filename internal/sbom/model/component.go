@@ -141,3 +141,30 @@ func (o Origin) IsKnown() bool {
 		return false
 	}
 }
+
+// EvidenceLevel records how strong our identity claim is for a
+// Component. Set by enrichers that emit Components from observation
+// (untracked file walk, base-image diff) so downstream consumers can
+// tell apart "this is package X" from "we saw this file, we don't
+// know what it is". Serialised as `astinus:evidence-level` property.
+//
+// S4 Task 0 introduced this distinction after a real-image audit
+// found Astinus emitting phantom `pkg:generic/<basename>` components
+// for stripped non-Go binaries (busybox symlinks, openssl helpers).
+// Those entries scored as `identified` in earlier versions and so
+// triggered Grype CVE matches that had no factual basis.
+type EvidenceLevel string
+
+// Canonical EvidenceLevel values.
+const (
+	// EvidenceLevelIdentified means the Component carries a
+	// verifiable identity: a package manager record, embedded
+	// buildinfo (Go / Rust auditable), a signed JAR manifest, or
+	// a Software Heritage content-hash match.
+	EvidenceLevelIdentified EvidenceLevel = "identified"
+
+	// EvidenceLevelObserved means we recorded the file (path,
+	// SHA-256, layer) without making a verifiable claim about its
+	// package identity. Such Components carry empty PURL and CPE.
+	EvidenceLevelObserved EvidenceLevel = "observed"
+)

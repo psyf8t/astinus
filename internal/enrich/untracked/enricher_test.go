@@ -35,8 +35,19 @@ func TestEnrichAddsExecutable(t *testing.T) {
 		t.Fatalf("components = %d, want 1", len(sbom.Components))
 	}
 	c := sbom.Components[0]
-	if c.Name != "foo" || c.Type != model.ComponentTypeApplication {
+	// S4 Task 0: a bare ELF blob with no Go buildinfo / no Rust
+	// auditable section / no SONAME has no verifiable identity, so
+	// the component is recorded as observed-only with Name=full path
+	// and Type=file (not application).
+	if c.Name != "opt/bin/foo" || c.Type != model.ComponentTypeFile {
 		t.Errorf("comp = %+v", c)
+	}
+	if c.PURL != "" || len(c.CPEs) != 0 {
+		t.Errorf("observed comp must have empty PURL/CPE: PURL=%q CPEs=%v", c.PURL, c.CPEs)
+	}
+	if c.Properties[model.PropertyEvidenceLevel] != string(model.EvidenceLevelObserved) {
+		t.Errorf("evidence-level = %q, want observed",
+			c.Properties[model.PropertyEvidenceLevel])
 	}
 	if c.Properties["astinus:untracked:category"] != "executable" {
 		t.Errorf("category = %q", c.Properties["astinus:untracked:category"])
@@ -604,10 +615,11 @@ func TestEnrichSkipsLicenseAndDocFiles(t *testing.T) {
 		for _, c := range sbom.Components {
 			got = append(got, c.Name)
 		}
-		t.Fatalf("components = %v, want [myapp]", got)
+		t.Fatalf("components = %v, want [opt/bin/myapp]", got)
 	}
-	if sbom.Components[0].Name != "myapp" {
-		t.Errorf("kept = %s, want myapp", sbom.Components[0].Name)
+	// S4 Task 0: bare ELF blob with no extractor metadata → observed.
+	if sbom.Components[0].Name != "opt/bin/myapp" {
+		t.Errorf("kept = %s, want opt/bin/myapp", sbom.Components[0].Name)
 	}
 }
 
@@ -652,6 +664,138 @@ func TestEnrichIncludeFlagsBypassFilters(t *testing.T) {
 		t.Errorf("bypassed = %d, want 2 (LICENSE + COPYING)", bypassed)
 	}
 }
+
+// ─── S4 Task 0: phantom-component regression coverage ────────────────
+
+// TestEnrichDoesNotEmitPurlShapeGuess — the canonical reproducer for
+// the 77-phantom symptom seen on real Grafana images. Several stripped
+// binaries named like busybox / openssl helpers are walked through
+// untracked enrichment; none of them should surface as
+// `pkg:generic/<basename>` components, none should carry the legacy
+// `PURL-shape guess` evidence string, and the Component schema must
+// stamp them as observed-only.
+func TestEnrichDoesNotEmitPurlShapeGuess(t *testing.T) {
+	// Bare ELF body — no SONAME, no Go buildinfo, no Rust auditable
+	// section. The post-S4-Task-0 extractors must reject this for
+	// identity purposes regardless of the filename basename.
+	bareELF := []byte{0x7f, 'E', 'L', 'F', 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8}
+	img := buildImage(t, map[string][]byte{
+		"usr/bin/busybox":          bareELF,
+		"usr/local/bin/myfakebash": bareELF,
+		"usr/local/bin/crypto":     bareELF,
+		"usr/local/bin/c_rehash":   bareELF,
+		"usr/local/bin/ssl_client": bareELF,
+	})
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+
+	if err := New().Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+
+	for _, c := range sbom.Components {
+		if c.PURL != "" {
+			t.Errorf("phantom PURL leaked: name=%s PURL=%s version=%s",
+				c.Name, c.PURL, c.Version)
+		}
+		if len(c.CPEs) != 0 {
+			t.Errorf("phantom CPE leaked: name=%s CPEs=%v", c.Name, c.CPEs)
+		}
+		for k, v := range c.Properties {
+			if v == "PURL-shape guess" {
+				t.Errorf("PURL-shape guess evidence resurfaced on %s: %s=%s",
+					c.Name, k, v)
+			}
+		}
+		if c.Properties[model.PropertyEvidenceLevel] != string(model.EvidenceLevelObserved) {
+			t.Errorf("evidence-level on %s = %q, want observed",
+				c.Name, c.Properties[model.PropertyEvidenceLevel])
+		}
+	}
+}
+
+// TestEnrichObservedOnlyComponentsHaveEmptyPurlAndCPE — observed-only
+// components MUST carry no PURL / no CPE / no version, type=file, and
+// keep a SHA-256 hash so consumers can dedupe by content.
+func TestEnrichObservedOnlyComponentsHaveEmptyPurlAndCPE(t *testing.T) {
+	bareELF := []byte{0x7f, 'E', 'L', 'F', 0, 0, 0, 0, 1, 2, 3, 4}
+	img := buildImage(t, map[string][]byte{
+		"usr/bin/busybox":      bareELF,
+		"usr/local/bin/blobby": []byte("not a binary, just opaque payload\x00\x01\x02"),
+	})
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+
+	if err := New().Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if len(sbom.Components) == 0 {
+		t.Fatal("expected observed components, got none")
+	}
+
+	for _, c := range sbom.Components {
+		if c.Properties[model.PropertyEvidenceLevel] != string(model.EvidenceLevelObserved) {
+			continue
+		}
+		if c.PURL != "" {
+			t.Errorf("observed comp has non-empty PURL: %s → %q", c.Name, c.PURL)
+		}
+		if len(c.CPEs) != 0 {
+			t.Errorf("observed comp has CPEs: %s → %v", c.Name, c.CPEs)
+		}
+		if c.Version != "" {
+			t.Errorf("observed comp has Version: %s → %q", c.Name, c.Version)
+		}
+		if c.Type != model.ComponentTypeFile {
+			t.Errorf("observed comp Type = %v, want file (name=%s)", c.Type, c.Name)
+		}
+		if len(c.Hashes) == 0 {
+			t.Errorf("observed comp missing hash: %s", c.Name)
+		}
+		// Path-as-Name keeps the evidence factual.
+		if c.Name == "busybox" || c.Name == "crypto" || c.Name == "blobby" {
+			t.Errorf("observed Name collapsed to basename: %q", c.Name)
+		}
+	}
+}
+
+// TestEnrichMatcherHitUpgradesToIdentified — a content-hash matcher
+// catalogue agreeing on identity must promote the row from observed
+// to identified and lift Type past `file` so downstream scanners
+// stop skipping the entry. S4 Task 0.
+func TestEnrichMatcherHitUpgradesToIdentified(t *testing.T) {
+	body := append([]byte("\x7fELF jq fake bytes"), bytes.Repeat([]byte{0x90}, 8192)...)
+	img := buildImage(t, map[string][]byte{
+		"opt/bin/jq": body,
+	})
+
+	digest := sha256Hex(t, body)
+	local := matcher.NewLocalMatcher()
+	local.Add(model.HashAlgorithmSHA256, digest, matcher.Match{
+		Name: "jq", Version: "1.7.1", PURL: "pkg:generic/jq@1.7.1",
+		CPEs:   []string{"cpe:2.3:a:jqlang:jq:1.7.1:*:*:*:*:*:*:*"},
+		Source: "test-local",
+	})
+
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+	if err := NewWithOptions(Options{Matcher: local}).Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if len(sbom.Components) != 1 {
+		t.Fatalf("components = %d", len(sbom.Components))
+	}
+	c := sbom.Components[0]
+	if c.Properties[model.PropertyEvidenceLevel] != string(model.EvidenceLevelIdentified) {
+		t.Errorf("evidence-level = %q, want identified",
+			c.Properties[model.PropertyEvidenceLevel])
+	}
+	if c.Type != model.ComponentTypeApplication {
+		t.Errorf("Type = %v, want application (matcher upgraded the row)", c.Type)
+	}
+}
+
+// ─── helpers ──────────────────────────────────────────────────────────────
 
 func buildImage(t *testing.T, files map[string][]byte) v1.Image {
 	t.Helper()

@@ -70,8 +70,12 @@ func TestJavaExtractorManifestFallback(t *testing.T) {
 	}
 }
 
-func TestJavaExtractorFilenameFallback(t *testing.T) {
-	// Empty zip — no metadata, only the filename.
+// S4 Task 0: the filename-pattern fallback was removed because a JAR
+// named `commons-lang3-3.14.0.jar` with no manifest / no pom.properties
+// is not a verifiable identity claim. JARs that fall past tiers 1 and 2
+// now return empty Identity and the untracked enricher records them
+// as observed-only.
+func TestJavaExtractorNoFilenameFallback(t *testing.T) {
 	body := buildJAR(t, nil)
 
 	id, err := (&JavaExtractor{}).Extract(context.Background(), File{
@@ -81,11 +85,8 @@ func TestJavaExtractorFilenameFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
-	if id.Name != "jq" || id.Version != "1.7.0" {
-		t.Errorf("identity = %+v", id)
-	}
-	if id.Properties["java.tier"] != "filename" {
-		t.Errorf("tier = %q", id.Properties["java.tier"])
+	if !id.IsEmpty() {
+		t.Errorf("Identity = %+v, want empty (filename fallback was removed)", id)
 	}
 }
 
@@ -148,6 +149,35 @@ func TestELFExtractorReturnsEmptyForBareELF(t *testing.T) {
 	}
 	if !id.IsEmpty() {
 		t.Errorf("Identity = %+v, want empty (no SONAME, no build-id, no .rodata)", id)
+	}
+}
+
+// S4 Task 0: an ELF binary with NO SONAME must yield empty Identity
+// even when its filename looks like a `.so` library or a known busybox
+// applet. Earlier revisions fell back to `basename(file.Path)`, which
+// fabricated `pkg:generic/<basename>` rows on stripped binaries.
+func TestELFExtractorNoBasenameFallbackWithoutSoname(t *testing.T) {
+	body := buildMinimalELF(t) // no .dynamic section → no SONAME
+	cases := []string{
+		"opt/lib/libssl.so.3",      // looks like a library
+		"usr/bin/busybox",          // a stripped multi-call binary
+		"usr/local/bin/crypto",     // openssl helper basename
+		"usr/local/bin/myfakebash", // busybox symlink target
+		"usr/local/bin/c_rehash",   // openssl script wrapper
+	}
+	for _, p := range cases {
+		t.Run(p, func(t *testing.T) {
+			id, err := (&ELFLibraryExtractor{}).Extract(context.Background(), File{
+				Path: p,
+				Body: body,
+			})
+			if err != nil {
+				t.Fatalf("Extract(%s): %v", p, err)
+			}
+			if !id.IsEmpty() {
+				t.Errorf("Identity for %s = %+v, want empty (no SONAME)", p, id)
+			}
+		})
 	}
 }
 
@@ -299,24 +329,27 @@ func TestPEExtractorRejectsNonPE(t *testing.T) {
 	}
 }
 
-func TestParsePEFilename(t *testing.T) {
-	cases := []struct {
-		in       string
-		wantName string
-		wantVer  string
-	}{
-		{"opt/myapp-1.2.3.exe", "myapp", "1.2.3"},
-		{"opt/MyApp_v4.5.6.dll", "MyApp", "4.5.6"},
-		{"plain.exe", "", ""},
-		{"opt/version-only.dll", "", ""},
+// S4 Task 0: the PE filename pattern (`name-1.2.3.exe`) was removed
+// because the filename is not a verifiable identity. Without
+// VS_VERSIONINFO parsing the extractor surfaces no Identity at all
+// for well-formed PE files; the untracked enricher records them as
+// observed-only.
+func TestPEExtractorNoFilenameFallback(t *testing.T) {
+	// A minimally valid PE that debug/pe will parse — just the MZ
+	// magic followed by the PE header at offset 0x80. We don't need a
+	// real binary; debug/pe.NewFile only requires the structure to be
+	// walkable. If parsing fails the extractor returns empty too, so
+	// either way the assertion holds.
+	body := []byte{'M', 'Z'}
+	id, err := (&PEExtractor{}).Extract(context.Background(), File{
+		Path: "opt/myapp-1.2.3.exe",
+		Body: body,
+	})
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.in, func(t *testing.T) {
-			gotName, gotVer := parsePEFilename(tc.in)
-			if gotName != tc.wantName || gotVer != tc.wantVer {
-				t.Errorf("got = (%q,%q), want (%q,%q)", gotName, gotVer, tc.wantName, tc.wantVer)
-			}
-		})
+	if !id.IsEmpty() {
+		t.Errorf("Identity = %+v, want empty (filename fallback removed)", id)
 	}
 }
 

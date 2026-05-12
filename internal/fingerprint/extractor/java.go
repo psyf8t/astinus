@@ -7,14 +7,13 @@ import (
 	"context"
 	"errors"
 	"io"
-	"regexp"
 	"strings"
 
 	"github.com/psyf8t/astinus/internal/fingerprint"
 )
 
 // JavaExtractor recovers Maven coordinates from a JAR / WAR / EAR
-// using a 3-tier fallback:
+// using a 2-tier source of truth:
 //
 //  1. `META-INF/maven/<group>/<artifact>/pom.properties` — the
 //     authoritative source written by the Maven build plugin.
@@ -22,8 +21,13 @@ import (
 //  2. `META-INF/MANIFEST.MF` — the universal JAR manifest. We trust
 //     Implementation-Title / Implementation-Version when populated;
 //     fall back to OSGi Bundle-* keys.
-//  3. Filename pattern (`commons-lang3-3.14.0.jar`) — last-resort
-//     guess when neither metadata source carries enough.
+//
+// S4 Task 0 removed the filename-pattern third tier: a JAR named
+// `commons-lang3-3.14.0.jar` with no manifest and no pom.properties
+// is not a verifiable identity claim, and synthesising one let
+// re-packaged / renamed JARs slip into the SBOM as identified
+// components. JARs that fall past both tiers are recorded as
+// observed-only by the untracked enricher.
 type JavaExtractor struct{}
 
 // Name implements Extractor.
@@ -45,9 +49,10 @@ func (*JavaExtractor) Match(_ context.Context, file File) bool {
 	return fingerprint.IsZIPArchive(file.Body)
 }
 
-// Extract walks the 3-tier fallback. Returns (empty, nil) when no
-// tier produced a usable name (corrupt JAR with neither manifest
-// nor parseable filename).
+// Extract walks the 2-tier source-of-truth chain. Returns
+// (empty, nil) when neither pom.properties nor MANIFEST.MF yields
+// a verifiable identity — the untracked enricher records the JAR
+// as observed-only in that case. S4 Task 0.
 func (*JavaExtractor) Extract(_ context.Context, file File) (Identity, error) {
 	zr, err := zip.NewReader(bytes.NewReader(file.Body), int64(len(file.Body)))
 	if err != nil {
@@ -58,9 +63,6 @@ func (*JavaExtractor) Extract(_ context.Context, file File) (Identity, error) {
 		return id, nil
 	}
 	if id, ok := readManifestIdentity(file, zr); ok {
-		return id, nil
-	}
-	if id, ok := identityFromJARFilename(file.Path); ok {
 		return id, nil
 	}
 	return Identity{}, nil
@@ -174,39 +176,6 @@ func readManifestIdentity(file File, _ *zip.Reader) (Identity, bool) {
 	}
 	if manifest.MainClass != "" {
 		id.Properties["java.main-class"] = manifest.MainClass
-	}
-	return id, true
-}
-
-// ─── tier 3: filename pattern ──────────────────────────────────────
-
-// jarFilenameVersion matches the conventional `name-version.jar` /
-// `name-version.war` / `name-version.ear` shape. The version starts
-// at the first `-N` segment and can carry pre-release / build
-// suffixes (`commons-lang3-3.14.0-SNAPSHOT`).
-var jarFilenameVersion = regexp.MustCompile(`^(?P<name>[A-Za-z0-9._]+(?:-[A-Za-z][A-Za-z0-9._]*)*?)-(?P<version>\d[A-Za-z0-9._-]*)\.(?:jar|war|ear)$`)
-
-func identityFromJARFilename(filePath string) (Identity, bool) {
-	base := basename(filePath)
-	m := jarFilenameVersion.FindStringSubmatch(base)
-	if m == nil {
-		return Identity{}, false
-	}
-	nameIdx := jarFilenameVersion.SubexpIndex("name")
-	versionIdx := jarFilenameVersion.SubexpIndex("version")
-	name := m[nameIdx]
-	version := m[versionIdx]
-	if name == "" || version == "" {
-		return Identity{}, false
-	}
-	id := Identity{
-		Name:    name,
-		Version: version,
-		PURL:    purlMaven("", name, version),
-		Properties: map[string]string{
-			"java.tier":       "filename",
-			"java.confidence": "low",
-		},
 	}
 	return id, true
 }

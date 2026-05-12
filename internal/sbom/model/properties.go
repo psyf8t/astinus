@@ -29,6 +29,12 @@ const (
 	PropertyEvidenceMethod     = "astinus:evidence:method"
 	PropertyEvidenceConfidence = "astinus:evidence:confidence"
 
+	// EvidenceLevel — "identified" (verifiable metadata: buildinfo,
+	// manifest, package record, content-hash match) vs "observed"
+	// (we saw the file, recorded its path/hash/layer, but cannot
+	// make a package-identity claim). S4 Task 0.
+	PropertyEvidenceLevel = "astinus:evidence-level"
+
 	// Top-level metadata stamp emitted on every Astinus-touched SBOM.
 	PropertyEnrichedBy      = "astinus:enriched-by"
 	PropertyEnrichedVersion = "astinus:enriched-version"

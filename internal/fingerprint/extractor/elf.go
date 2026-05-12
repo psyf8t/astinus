@@ -17,6 +17,15 @@ import (
 // language-specific extractors (Go, Rust) match first and produce
 // stronger Identities; the ELF extractor catches everything else
 // (`libc.so.6`, `libssl.so.3`, vendored `.so` blobs).
+//
+// S4 Task 0: SONAME is the only identity signal this extractor trusts.
+// Earlier revisions fell back to the file's basename when SONAME was
+// absent — that produced ~77 phantom `pkg:generic/<basename>` rows on
+// real images (stripped busybox / openssl helpers, named symlinks),
+// which then attracted false-positive CVE matches in downstream
+// scanners. A binary without a DT_SONAME entry has no verifiable
+// package identity, so the extractor now returns empty Identity and
+// the untracked enricher records the file as observed-only.
 type ELFLibraryExtractor struct{}
 
 // Name implements Extractor.
@@ -33,9 +42,12 @@ func (*ELFLibraryExtractor) Match(_ context.Context, file File) bool {
 	return fingerprint.IsELF(file.Body)
 }
 
-// Extract reads the ELF file and returns whatever metadata is
-// recoverable: SONAME (.dynamic DT_SONAME), GNU build-id (.note.gnu.build-id),
-// and a heuristic version string from .rodata.
+// Extract reads the ELF file and returns Identity when DT_SONAME is
+// present (the only ELF metadata that anchors a package identity).
+// GNU build-id and .rodata version strings alone don't tell us which
+// package the binary belongs to, so they no longer fabricate an
+// Identity — the caller will record the file as observed-only. S4
+// Task 0.
 func (*ELFLibraryExtractor) Extract(_ context.Context, file File) (Identity, error) {
 	f, err := elf.NewFile(bytes.NewReader(file.Body))
 	if err != nil {
@@ -44,31 +56,29 @@ func (*ELFLibraryExtractor) Extract(_ context.Context, file File) (Identity, err
 	defer func() { _ = f.Close() }()
 
 	soname := readELFSoname(f)
-	buildID := readELFBuildID(f)
-	version := readELFVersionString(f)
-
-	if soname == "" && buildID == "" && version == "" {
+	if soname == "" {
+		// No SONAME — without it we have no verifiable identity.
+		// Earlier revisions fell back to basename(file.Path) and
+		// produced phantom `pkg:generic/<basename>` rows; that path
+		// is gone (see type doc).
 		return Identity{}, nil
 	}
 
 	name := sonameToName(soname)
 	if name == "" {
-		// Fall back to filename — e.g., `libsodium.so.23.3.0`
-		// without a recoverable SONAME still has a usable basename.
-		name = sonameToName(basename(file.Path))
-	}
-	if name == "" {
 		return Identity{}, nil
 	}
 
-	props := map[string]string{}
-	if soname != "" {
-		props["elf.soname"] = soname
+	buildID := readELFBuildID(f)
+	version := readELFVersionString(f)
+
+	props := map[string]string{
+		"elf.soname":  soname,
+		"elf.machine": f.Machine.String(),
 	}
 	if buildID != "" {
 		props["elf.buildid"] = buildID
 	}
-	props["elf.machine"] = f.Machine.String()
 
 	id := Identity{
 		Name:       name,

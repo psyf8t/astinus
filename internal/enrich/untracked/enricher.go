@@ -33,7 +33,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"path"
 	"strings"
 	"sync"
 	"time"
@@ -748,11 +747,12 @@ func (e *Enricher) enrichEmbedded(ctx context.Context, comp *model.Component, ca
 	applyExtractorIdentity(comp, id)
 }
 
-// applyExtractorIdentity copies an Identity onto comp. Existing
-// Component fields (PURL, Vendor) are overwritten ONLY when the
-// extractor produced a non-empty value — Syft-supplied data on the
-// component is preserved when the extractor returns nothing for that
-// field.
+// applyExtractorIdentity copies an Identity onto comp. The base row
+// is observed-only (Type=file, Name=path, no PURL); a successful
+// extractor upgrades it to identified and fills in package fields.
+// Fields are overwritten only when the extractor produced a
+// non-empty value so Syft-supplied data is preserved otherwise.
+// S4 Task 0.
 func applyExtractorIdentity(c *model.Component, id extractor.Identity) {
 	if id.Name != "" {
 		c.Name = id.Name
@@ -770,10 +770,9 @@ func applyExtractorIdentity(c *model.Component, id extractor.Identity) {
 		c.Properties = map[string]string{}
 	}
 	c.Properties["astinus:extractor:source"] = id.Source
-	if id.Source == "java" {
-		// Library type for JARs (the base classifier picks
-		// `file` for Archive — extracting a JAR upgrades it).
-		c.Type = model.ComponentTypeLibrary
+	c.Properties[model.PropertyEvidenceLevel] = string(model.EvidenceLevelIdentified)
+	if t := componentTypeForExtractor(id.Source); t != model.ComponentTypeFile {
+		c.Type = t
 	}
 	for k, v := range id.Properties {
 		if v == "" {
@@ -809,11 +808,17 @@ func normalize(p string) string {
 
 // buildBaseComponent fills in the fields every untracked Component
 // gets regardless of category.
+//
+// The baseline is deliberately conservative: Type = file, Name = full
+// path, no PURL / CPE, and `astinus:evidence-level = observed`. An
+// identifying source (the multi-modal extractor registry, or the
+// fingerprint matcher) upgrades the row to `identified` and fills in
+// the package fields when verifiable metadata exists. S4 Task 0.
 func buildBaseComponent(fe layer.FileEntry, cls Result, sha256Short string, hashes []model.Hash) model.Component {
 	comp := model.Component{
 		BOMRef: "untracked-" + sha256Short[:min(12, len(sha256Short))],
-		Type:   componentTypeFor(cls.Category),
-		Name:   path.Base(fe.Path),
+		Type:   model.ComponentTypeFile,
+		Name:   fe.Path,
 		Hashes: hashes,
 		Evidence: &model.Evidence{
 			Method:    "untracked-scan",
@@ -826,21 +831,22 @@ func buildBaseComponent(fe layer.FileEntry, cls Result, sha256Short string, hash
 		},
 		Properties: map[string]string{
 			"astinus:untracked:category": categoryString(cls.Category),
+			model.PropertyEvidenceLevel:  string(model.EvidenceLevelObserved),
 		},
 	}
 	return comp
 }
 
-// componentTypeFor maps a Category to the SBOM ComponentType it
-// makes sense to record.
-func componentTypeFor(c Category) model.ComponentType {
-	switch c {
-	case CategoryExecutable, CategoryScript:
+// componentTypeForExtractor maps an Extractor.Name() to the SBOM
+// ComponentType the recovered identity warrants. Used by
+// applyExtractorIdentity to upgrade observed rows once an extractor
+// finds verifiable metadata. S4 Task 0.
+func componentTypeForExtractor(source string) model.ComponentType {
+	switch source {
+	case "go", "rust":
 		return model.ComponentTypeApplication
-	case CategoryLibrary:
+	case "java", "python", "elf-library":
 		return model.ComponentTypeLibrary
-	case CategoryArchive:
-		return model.ComponentTypeFile
 	default:
 		return model.ComponentTypeFile
 	}
@@ -887,6 +893,14 @@ func applyMatch(c *model.Component, m matcher.Match) {
 	}
 	if m.Source != "" {
 		c.Properties["astinus:untracked:matcher"] = m.Source
+	}
+	// A matcher hit means a content-hash catalogue agreed on identity.
+	// Upgrade the row from the observed baseline to identified, and
+	// promote Type from `file` to `application` so consumers don't
+	// drop it as a non-package row. S4 Task 0.
+	c.Properties[model.PropertyEvidenceLevel] = string(model.EvidenceLevelIdentified)
+	if c.Type == model.ComponentTypeFile {
+		c.Type = model.ComponentTypeApplication
 	}
 }
 

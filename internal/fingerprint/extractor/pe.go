@@ -5,28 +5,30 @@ import (
 	"context"
 	"debug/pe"
 	"fmt"
-	"regexp"
 
 	"github.com/psyf8t/astinus/internal/fingerprint"
 )
 
 // PEExtractor recognises Windows PE binaries (`.exe`, `.dll`).
 //
-// Today the extractor is intentionally minimal: it confirms the file
-// is a PE, records the machine architecture, and falls back to
-// filename-based version parsing. Full VS_VERSIONINFO resource
-// parsing (ProductName / ProductVersion / CompanyName from the
-// .rsrc section) is documented as deferred — container images are
-// overwhelmingly Linux and PE files are rare enough that the ROI
-// on a 200-LOC resource-tree parser is small. ADR-0022 records
-// the trade-off.
+// The extractor confirms the file is a PE and records the machine
+// architecture as a property. It does NOT synthesise a package
+// identity — VS_VERSIONINFO resource parsing (ProductName /
+// ProductVersion / CompanyName from the .rsrc section) is deferred
+// (ADR-0022 records the trade-off), and the filename-pattern
+// fallback that earlier revisions used was a guess that fabricated
+// `pkg:nuget/<name>@<version>` rows from any binary named
+// `something-1.2.3.exe`. S4 Task 0 removed it; PE files without
+// embedded resource metadata are recorded as observed-only by the
+// untracked enricher.
 type PEExtractor struct{}
 
 // Name implements Extractor.
 func (*PEExtractor) Name() string { return "pe" }
 
-// Confidence — without VERSIONINFO we only recover a name from the
-// filename. Treat as a low-confidence fallback.
+// Confidence — without VERSIONINFO we cannot recover identity. The
+// value is kept for the interface contract but the extractor never
+// produces a non-empty Identity today.
 func (*PEExtractor) Confidence() float64 { return 0.6 }
 
 // Match — PE files start with `MZ` magic.
@@ -34,68 +36,20 @@ func (*PEExtractor) Match(_ context.Context, file File) bool {
 	return fingerprint.IsPE(file.Body)
 }
 
-// Extract returns whatever metadata `debug/pe` directly exposes
-// (machine architecture, characteristics flags) plus a filename-
-// derived name + version.
-//
-// Returns (empty, nil) when the PE header is unreadable AND the
-// filename has no recognisable version pattern.
+// Extract returns Identity only when verifiable PE metadata is
+// recoverable. Today no path produces it (VS_VERSIONINFO parsing is
+// future work, S4 Task 0 removed the filename-pattern guess), so
+// the function always returns (empty, nil) for well-formed PE files
+// — operators see the `astinus:untracked:category=executable` stamp
+// and the observed-only marker.
 func (*PEExtractor) Extract(_ context.Context, file File) (Identity, error) {
 	f, err := pe.NewFile(bytes.NewReader(file.Body))
 	if err != nil {
 		return Identity{}, nil //nolint:nilerr // bad PE is "no match", not an error
 	}
 	defer func() { _ = f.Close() }()
-
-	props := map[string]string{
-		"pe.machine": peMachineString(f.Machine),
-	}
-
-	name, version := parsePEFilename(file.Path)
-	if name == "" {
-		// Without a parseable filename we have no usable Name —
-		// drop the identity. Operators see only the
-		// `astinus:untracked:category=executable` stamp the base
-		// classifier writes.
-		return Identity{}, nil
-	}
-	id := Identity{
-		Name:       name,
-		Version:    version,
-		PURL:       purlGenericPE(name, version),
-		Properties: props,
-	}
-	return id, nil
-}
-
-// peFilenameVersion matches `Name-1.2.3.exe`, `Name_v4.5.exe`,
-// `Name 1.0.dll`. The version segment is required so we don't
-// accidentally claim every `.exe` is a real package.
-var peFilenameVersion = regexp.MustCompile(`^(?P<name>[A-Za-z][A-Za-z0-9_+.-]*?)[-_ ]v?(?P<version>\d[A-Za-z0-9._+-]*)\.(?:exe|dll)$`)
-
-func parsePEFilename(filePath string) (name, version string) {
-	base := basename(filePath)
-	m := peFilenameVersion.FindStringSubmatch(base)
-	if m == nil {
-		return "", ""
-	}
-	nameIdx := peFilenameVersion.SubexpIndex("name")
-	versionIdx := peFilenameVersion.SubexpIndex("version")
-	return m[nameIdx], m[versionIdx]
-}
-
-// purlGenericPE renders a `pkg:nuget/...` PURL. NuGet is the
-// closest mainstream registry for PE-shipped packages; consumers
-// downstream may rewrite to `pkg:generic` if NuGet is wrong for
-// their case.
-func purlGenericPE(name, version string) string {
-	if name == "" {
-		return ""
-	}
-	if version == "" {
-		return "pkg:nuget/" + name
-	}
-	return fmt.Sprintf("pkg:nuget/%s@%s", name, version)
+	_ = peMachineString(f.Machine) // reserved for future VERSIONINFO path
+	return Identity{}, nil
 }
 
 // peMachineString turns debug/pe's numeric machine code into the

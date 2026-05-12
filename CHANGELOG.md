@@ -11,7 +11,45 @@ public CLI / output surface.
 
 ## Unreleased
 
-<!-- Next release entries go here. -->
+### Removed
+
+- **Filename-only identity heuristics in the untracked enricher.**
+  The ELF extractor no longer falls back to `basename(file.Path)`
+  when `DT_SONAME` is absent; the PE extractor's
+  `name-1.2.3.exe` filename guess is gone; the JAR extractor's
+  third-tier filename fallback (`commons-lang3-3.14.0.jar`) is
+  gone. On a real Grafana image these paths fabricated **77
+  phantom `pkg:generic/<basename>` components** (`busybox`,
+  `crypto`, `c_rehash`, `ssl_client`, …) that then attracted
+  18 false-positive CVE matches in Grype. None of them
+  corresponded to real packages. (ADR-0038, S4 Task 0.)
+
+### Added
+
+- **`astinus:evidence-level` component property.** Every
+  Component now carries either `identified` (verifiable
+  metadata — buildinfo, signed manifest, dist-info record, or
+  a fingerprint-matcher hit) or `observed` (we recorded the
+  file's path / SHA-256 / layer but cannot make a
+  package-identity claim). Surfaced as a property and as the
+  `model.EvidenceLevel` typed field. Lets policy frameworks,
+  vulnerability scanners, and audit reviewers branch on
+  evidence strength explicitly. (ADR-0038, S4 Task 0.)
+
+### Fixed
+
+- **Phantom CVE matches sourced from untracked enrichment.** On
+  the Sprint-4 reproducer image, Grype no longer reports
+  `pkg:generic/busybox@1.0`-attributed CVEs that originated
+  inside Astinus rather than inside the image. (ADR-0038,
+  S4 Task 0.)
+- **`untracked` Component schema for unidentified files.**
+  Files the multi-modal extractor registry cannot identify are
+  now emitted with `Type = file`, `Name` = full path,
+  empty PURL / CPE / version, plus the SHA-256 hash and layer
+  digest. Earlier revisions emitted `Type = application`,
+  `Name` = basename, which made the row look like a package
+  claim to downstream scanners. (S4 Task 0.)
 
 ## v0.0.1 — 2026-05-05 (first public release)
 
