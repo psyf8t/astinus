@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -10,21 +11,24 @@ import (
 	"github.com/psyf8t/astinus/internal/telemetry"
 )
 
-// TestBuildCPEEnricherSkipsNVDInLargeHybridWorkload is the wire-up
+// TestBuildCPEEnricherSkipsNVDInLargeAutoWorkload is the wire-up
 // test for the CPE rate-limit graceful-degradation policy
-// (ADR-0028). The predicate test (cpe_degrade_test.go) covers the
-// decision matrix; this test asserts buildCPEEnricher actually
-// honours the predicate by:
+// (ADR-0028 + ADR-0043). S4 Task 4 moved the predicate's trigger
+// from ModeHybrid → ModeAuto. The predicate test
+// (cpe_degrade_test.go) covers the decision matrix; this test
+// asserts buildCPEEnricher honours the predicate by:
 //
 //   - emitting the EventCPENVDSkipped warning, AND
-//   - omitting the NVD source from the resolver chain.
+//   - omitting the NVD source from the resolver chain, AND
+//   - recording "online-nvd" in opts.cpeSkippedSources.
 func TestBuildCPEEnricherSkipsNVDInLargeHybridWorkload(t *testing.T) {
 	t.Setenv("NVD_API_KEY", "")
 	logBuf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
+	opts := &enrichOptions{cpeMode: "auto"}
 	enr, err := buildCPEEnricher(
-		&enrichOptions{cpeMode: "hybrid"},
+		opts,
 		nil, logger,
 		nvdHybridSkipThreshold+1, // above the threshold
 	)
@@ -41,17 +45,25 @@ func TestBuildCPEEnricherSkipsNVDInLargeHybridWorkload(t *testing.T) {
 	}
 	for _, want := range []string{
 		"NVD_API_KEY",
-		"--cpe-mode online",
+		"--cpe-mode hybrid",
 		"5 req/30s",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected log to mention %q, got:\n%s", want, out)
 		}
 	}
+	wantSkipped := []string{"online-nvd"}
+	if !equalStringSlice(opts.cpeSkippedSources, wantSkipped) {
+		t.Errorf("opts.cpeSkippedSources = %v, want %v",
+			opts.cpeSkippedSources, wantSkipped)
+	}
+	if opts.cpeModeEffective != "auto" {
+		t.Errorf("opts.cpeModeEffective = %q, want auto", opts.cpeModeEffective)
+	}
 }
 
 // TestBuildCPEEnricherKeepsNVDBelowThreshold asserts the converse:
-// for small hybrid workloads, the NVD source stays in the chain
+// for small auto-mode workloads, the NVD source stays in the chain
 // (no degradation, no warning).
 func TestBuildCPEEnricherKeepsNVDBelowThreshold(t *testing.T) {
 	t.Setenv("NVD_API_KEY", "")
@@ -59,7 +71,7 @@ func TestBuildCPEEnricherKeepsNVDBelowThreshold(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	enr, err := buildCPEEnricher(
-		&enrichOptions{cpeMode: "hybrid"},
+		&enrichOptions{cpeMode: "auto"},
 		nil, logger,
 		nvdHybridSkipThreshold, // exactly at threshold; must NOT skip
 	)
@@ -75,10 +87,45 @@ func TestBuildCPEEnricherKeepsNVDBelowThreshold(t *testing.T) {
 	}
 }
 
-// TestBuildCPEEnricherKeepsNVDInOnlineMode confirms `--cpe-mode online`
-// is never second-guessed even on huge workloads — operators who
-// asked for network get network.
-func TestBuildCPEEnricherKeepsNVDInOnlineMode(t *testing.T) {
+// TestBuildCPEEnricherFailsFastInHybridWithoutAPIKey — S4 Task 4:
+// the strict variant (`--cpe-mode hybrid`) refuses to run when NVD
+// would be effectively unreachable under anonymous rate limits.
+// Exit code is wired by newExitError(ExitCPESourceUnavailable, ...).
+func TestBuildCPEEnricherFailsFastInHybridWithoutAPIKey(t *testing.T) {
+	t.Setenv("NVD_API_KEY", "")
+	logBuf := &bytes.Buffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	enr, err := buildCPEEnricher(
+		&enrichOptions{cpeMode: "hybrid"},
+		nil, logger,
+		nvdHybridSkipThreshold+1,
+	)
+	if err == nil {
+		t.Fatalf("expected fail-fast error, got nil; enr=%v", enr)
+	}
+	var exitErr *exitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected exitError, got %T: %v", err, err)
+	}
+	if exitErr.code != ExitCPESourceUnavailable {
+		t.Errorf("exit code = %d, want %d", exitErr.code, ExitCPESourceUnavailable)
+	}
+	for _, want := range []string{
+		"NVD_API_KEY",
+		"--cpe-mode=auto",
+		"--cpe-mode=offline",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("expected error to mention %q, got:\n%s", want, err.Error())
+		}
+	}
+}
+
+// TestBuildCPEEnricherOnlineAliasWarns confirms `--cpe-mode online`
+// emits a deprecation warning and behaves as hybrid (fail-fast on
+// rate-limit hazard).
+func TestBuildCPEEnricherOnlineAliasWarns(t *testing.T) {
 	t.Setenv("NVD_API_KEY", "")
 	logBuf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -86,14 +133,28 @@ func TestBuildCPEEnricherKeepsNVDInOnlineMode(t *testing.T) {
 	_, err := buildCPEEnricher(
 		&enrichOptions{cpeMode: string(cpesources.ModeOnline)},
 		nil, logger,
-		6406, // user's reported huge workload
+		6406,
 	)
-	if err != nil {
-		t.Fatalf("buildCPEEnricher: %v", err)
+	if err == nil {
+		t.Fatal("expected fail-fast error under online alias")
 	}
-	if strings.Contains(logBuf.String(), telemetry.EventCPENVDSkipped) {
-		t.Errorf("online mode must not trigger NVD skip, got:\n%s", logBuf.String())
+	if !strings.Contains(logBuf.String(), "cpe.mode.deprecated") {
+		t.Errorf("expected cpe.mode.deprecated log; got:\n%s", logBuf.String())
 	}
+}
+
+// equalStringSlice — local helper so this test file doesn't pull in
+// an extra dep.
+func equalStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestBuildCPEEnricherKeepsNVDWithAPIKey asserts that supplying an

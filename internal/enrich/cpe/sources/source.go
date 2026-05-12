@@ -9,8 +9,10 @@ import (
 // Mode controls which Sources the orchestrator runs.
 //
 // Operators choose the mode via `--cpe-mode`. The default is
-// ModeHybrid: offline first (cheap, deterministic), online for
-// the long tail.
+// ModeAuto since S4 Task 4: do the best with whatever online
+// sources are reachable, skip the rest with a WARN log.
+// ModeHybrid is the strict variant — fails fast (exit 60) when any
+// expected online source is unavailable.
 type Mode string
 
 // Recognised modes.
@@ -19,27 +21,42 @@ const (
 	// false. Guaranteed to make zero outbound HTTP calls.
 	ModeOffline Mode = "offline"
 
-	// ModeOnline runs every Source — offline AND online. Network
-	// failures degrade per-Source (the orchestrator continues with
-	// the next Source).
+	// ModeAuto runs every reachable Source and skips unavailable
+	// ones with a WARN log. The current default — picks up the
+	// graceful-degradation behaviour earlier revisions had under
+	// "hybrid" (silently dropping NVD when the workload would wedge
+	// the anonymous rate limit). S4 Task 4.
+	ModeAuto Mode = "auto"
+
+	// ModeOnline is the deprecated alias for ModeHybrid. Kept so
+	// scripts that pass `--cpe-mode online` keep working through
+	// v0.0.x; will be removed in v1.0.0. The orchestrator treats
+	// it identically to ModeHybrid.
 	ModeOnline Mode = "online"
 
-	// ModeHybrid is ModeOffline-first: offline Sources run in
-	// priority order, and online Sources only run when no offline
-	// Source produced a high-confidence match. Default for
-	// operators who didn't pass `--cpe-mode`.
+	// ModeHybrid is the strict variant: every recognised online
+	// source MUST be reachable, or the CLI exits 60 with an
+	// actionable error. S4 Task 4 flipped the semantics from the
+	// pre-S4 "graceful degradation" shape, which now lives under
+	// ModeAuto.
 	ModeHybrid Mode = "hybrid"
 )
 
 // IsKnown reports whether m is a recognised mode value.
 func (m Mode) IsKnown() bool {
 	switch m {
-	case ModeOffline, ModeOnline, ModeHybrid:
+	case ModeOffline, ModeAuto, ModeOnline, ModeHybrid:
 		return true
 	default:
 		return false
 	}
 }
+
+// IsStrict reports whether m requires every recognised online
+// source to be available — i.e. unavailability is a fail-fast
+// condition rather than a WARN-and-continue. True for ModeHybrid
+// and the deprecated ModeOnline alias. S4 Task 4.
+func (m Mode) IsStrict() bool { return m == ModeHybrid || m == ModeOnline }
 
 // Source is one backend the orchestrator queries to resolve a PURL
 // into CPE candidates.

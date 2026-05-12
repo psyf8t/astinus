@@ -11,6 +11,40 @@ public CLI / output surface.
 
 ## Unreleased
 
+### BREAKING
+
+- **`--cpe-mode` default changed from `hybrid` to `auto`.** The
+  pre-S4 `hybrid` default silently dropped unavailable online
+  sources (the rate-limit graceful degradation from ADR-0028).
+  That behaviour now lives under the new `auto` value, which is
+  the default. Explicit `--cpe-mode hybrid` is now strict — it
+  exits **60** when an expected online source is unavailable
+  (typically NVD without an API key on a workload that would
+  exceed the anonymous rate limit). `--cpe-mode online` is a
+  deprecated alias for `hybrid` (DeprecationWarning logged; will
+  be removed in v1.0.0). Operators who relied on the pre-S4
+  silent-degradation should either remove the explicit flag (auto
+  is the new default) or pass `--cpe-mode auto`. CI gates that
+  want the strict behaviour can pass `--cpe-mode hybrid` and add
+  exit code 60 to their known set. (ADR-0043, S4 Task 4.)
+
+### Added
+
+- **Exit code 60 (`ExitCPESourceUnavailable`).** Emitted when
+  `--cpe-mode hybrid` (or the deprecated `online` alias) cannot
+  enable a required online source. The error message lists the
+  unavailable source and the resolution options (set
+  `NVD_API_KEY`, switch to `--cpe-mode=auto`, or switch to
+  `--cpe-mode=offline`). (ADR-0043, S4 Task 4.)
+- **SBOM-level CPE-mode metadata.** Every Astinus-enriched SBOM
+  now carries `astinus:cpe:mode` (the effective mode: `auto`,
+  `hybrid`, `offline`) and, when degradation fired,
+  `astinus:cpe:sources-skipped` (comma-separated list of dropped
+  source IDs — today only `online-nvd`). SBOM consumers like
+  Dependency-Track can branch on these to tell apart full-online
+  enrichment from a degraded-auto run without parsing logs.
+  (ADR-0043, S4 Task 4.)
+
 ### Fixed
 
 - **Go-module CPEs no longer create misleading scanner match

@@ -48,10 +48,14 @@ type Options struct {
 // ModeOffline, Sources whose RequiresNetwork returns true are
 // dropped at registration; the resolver then guarantees zero
 // outbound HTTP calls.
+//
+// S4 Task 4: the zero-value / unknown-Mode fallback is ModeAuto
+// (was ModeHybrid). ModeHybrid now means strict — see
+// EcosystemPolicy in the CLI layer.
 func NewMultiSource(opts Options) *MultiSourceResolver {
 	mode := opts.Mode
 	if !mode.IsKnown() {
-		mode = ModeHybrid
+		mode = ModeAuto
 	}
 	logger := opts.Logger
 	if logger == nil {
@@ -125,9 +129,14 @@ func (r *MultiSourceResolver) resolveCtx(ctx context.Context, p cpe.PURL) []cpe.
 	var all []cpe.Candidate
 	haveOfflineHigh := false
 	for _, src := range r.sources {
-		// In hybrid mode, skip online sources when an offline
+		// In hybrid / auto mode, skip online sources when an offline
 		// source has already produced a high-confidence answer.
-		if r.mode == ModeHybrid && haveOfflineHigh && src.RequiresNetwork() {
+		// ModeOnline keeps walking even when offline gave a high
+		// match (operator explicitly asked for the full sweep). S4
+		// Task 4: ModeAuto behaves like ModeHybrid here (the new
+		// "strict" semantic only changes source-availability
+		// handling, not the walk order).
+		if shouldShortCircuitOnHigh(r.mode) && haveOfflineHigh && src.RequiresNetwork() {
 			continue
 		}
 		cands, err := src.Match(ctx, p)
@@ -149,6 +158,16 @@ func (r *MultiSourceResolver) resolveCtx(ctx context.Context, p cpe.PURL) []cpe.
 
 	r.cache.Set(key, all)
 	return all
+}
+
+// shouldShortCircuitOnHigh reports whether the resolver should stop
+// walking online sources once an offline source produced a
+// high-confidence match. True for ModeAuto and ModeHybrid (the
+// hybrid family); false for ModeOnline (operator asked for the full
+// sweep) and ModeOffline (online sources already filtered out). S4
+// Task 4.
+func shouldShortCircuitOnHigh(m Mode) bool {
+	return m == ModeAuto || m == ModeHybrid
 }
 
 // purlCacheKey is the stable cache lookup key for a PURL.

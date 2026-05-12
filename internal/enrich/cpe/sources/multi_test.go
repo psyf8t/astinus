@@ -66,10 +66,13 @@ func TestModeOnlineKeepsAllSources(t *testing.T) {
 	}
 }
 
-func TestModeUnknownDefaultsToHybrid(t *testing.T) {
+// TestModeUnknownDefaultsToAuto — S4 Task 4 flipped the zero / unknown
+// default from ModeHybrid (strict) to ModeAuto (graceful skip). Earlier
+// revisions tested for hybrid; the new test pins the auto default.
+func TestModeUnknownDefaultsToAuto(t *testing.T) {
 	r := NewMultiSource(Options{Mode: "garbage"})
-	if r.Mode() != ModeHybrid {
-		t.Errorf("Mode = %q, want hybrid (unknown should default)", r.Mode())
+	if r.Mode() != ModeAuto {
+		t.Errorf("Mode = %q, want auto (unknown should default)", r.Mode())
 	}
 }
 

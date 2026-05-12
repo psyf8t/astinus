@@ -40,6 +40,12 @@ const (
 	// make a package-identity claim). S4 Task 0.
 	PropertyEvidenceLevel = "astinus:evidence-level"
 
+	// CPE-mode metadata stamped onto sbom.Metadata.Properties so
+	// downstream consumers can tell apart full-online enrichment
+	// from a degraded-auto run. S4 Task 4.
+	PropertyCPEMode           = "astinus:cpe:mode"
+	PropertyCPESourcesSkipped = "astinus:cpe:sources-skipped"
+
 	// Top-level metadata stamp emitted on every Astinus-touched SBOM.
 	PropertyEnrichedBy      = "astinus:enriched-by"
 	PropertyEnrichedVersion = "astinus:enriched-version"

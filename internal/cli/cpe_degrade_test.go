@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	cpesources "github.com/psyf8t/astinus/internal/enrich/cpe/sources"
+	"github.com/psyf8t/astinus/internal/sbom/model"
 )
 
 func TestShouldSkipAnonymousNVDInHybrid(t *testing.T) {
@@ -15,23 +16,27 @@ func TestShouldSkipAnonymousNVDInHybrid(t *testing.T) {
 		components int
 		want       bool
 	}{
-		// Positive case — the bug from the user report.
-		{"hybrid + no key + 100 components", cpesources.ModeHybrid, "", 100, true},
-		{"hybrid + no key + threshold+1", cpesources.ModeHybrid, "", nvdHybridSkipThreshold + 1, true},
-		{"hybrid + no key + 6406 components (real wedge)", cpesources.ModeHybrid, "", 6406, true},
+		// Positive cases — S4 Task 4 moved the predicate's trigger
+		// from ModeHybrid to ModeAuto. Hybrid now fail-fasts via a
+		// separate predicate.
+		{"auto + no key + 100 components", cpesources.ModeAuto, "", 100, true},
+		{"auto + no key + threshold+1", cpesources.ModeAuto, "", nvdHybridSkipThreshold + 1, true},
+		{"auto + no key + 6406 components (real wedge)", cpesources.ModeAuto, "", 6406, true},
 
 		// Boundary — exactly at threshold should NOT trip.
-		{"hybrid + no key + at threshold", cpesources.ModeHybrid, "", nvdHybridSkipThreshold, false},
+		{"auto + no key + at threshold", cpesources.ModeAuto, "", nvdHybridSkipThreshold, false},
 
 		// Small workload — even rate-limited NVD finishes in tolerable time.
-		{"hybrid + no key + small workload", cpesources.ModeHybrid, "", 10, false},
+		{"auto + no key + small workload", cpesources.ModeAuto, "", 10, false},
 
-		// Operator explicitly chose online — never second-guess them.
-		{"online + no key + huge workload", cpesources.ModeOnline, "", 6406, false},
+		// Hybrid mode is strict — graceful skip predicate must NOT fire
+		// even on huge workloads (the fail-fast predicate handles it).
+		{"hybrid + no key + huge workload", cpesources.ModeHybrid, "", 6406, false},
+		{"online (alias) + no key + huge workload", cpesources.ModeOnline, "", 6406, false},
 
 		// Operator supplied a key — 10x rate limit, wedge does not happen.
+		{"auto + key + huge workload", cpesources.ModeAuto, "set", 6406, false},
 		{"hybrid + key + huge workload", cpesources.ModeHybrid, "set", 6406, false},
-		{"online + key + huge workload", cpesources.ModeOnline, "set", 6406, false},
 
 		// Offline mode — NVD source not added at all in the orchestrator;
 		// the predicate is N/A but for safety should also return false.
@@ -85,10 +90,105 @@ func TestNVDSkipAdviceContainsActionableHints(t *testing.T) {
 		"Skipping NVD API source",
 		"NVD_API_KEY",
 		"https://nvd.nist.gov/developers/request-an-api-key",
-		"--cpe-mode online",
+		// S4 Task 4: graceful-skip advice now points at hybrid for
+		// callers who want the strict variant.
+		"--cpe-mode hybrid",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("advice missing %q\nfull message: %s", want, got)
 		}
+	}
+}
+
+// TestNVDFailFastAdviceContainsActionableHints covers the strict
+// counterpart wrapped in the exit-60 error. S4 Task 4.
+func TestNVDFailFastAdviceContainsActionableHints(t *testing.T) {
+	got := nvdFailFastAdvice(6406)
+	for _, want := range []string{
+		"cpe-mode=hybrid",
+		"NVD_API_KEY",
+		"--cpe-mode=auto",
+		"--cpe-mode=offline",
+		"5 req/30s",
+		"6406 components",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fail-fast advice missing %q\nfull message: %s", want, got)
+		}
+	}
+}
+
+// TestStampCPEModeMetadata covers the SBOM-metadata stamp helper
+// that lets downstream SBOM consumers tell apart full-online runs
+// from auto-degraded runs (e.g. NVD skipped because no API key).
+// S4 Task 4.
+func TestStampCPEModeMetadata(t *testing.T) {
+	t.Run("auto with skipped sources", func(t *testing.T) {
+		sbom := &model.SBOM{}
+		opts := &enrichOptions{
+			cpeMode:           "auto",
+			cpeModeEffective:  "auto",
+			cpeSkippedSources: []string{"online-nvd"},
+		}
+		stampCPEModeMetadata(sbom, opts)
+		if got := sbom.Metadata.Properties[model.PropertyCPEMode]; got != "auto" {
+			t.Errorf("PropertyCPEMode = %q, want auto", got)
+		}
+		if got := sbom.Metadata.Properties[model.PropertyCPESourcesSkipped]; got != "online-nvd" {
+			t.Errorf("PropertyCPESourcesSkipped = %q, want online-nvd", got)
+		}
+	})
+	t.Run("hybrid full-online", func(t *testing.T) {
+		sbom := &model.SBOM{}
+		opts := &enrichOptions{
+			cpeMode:          "hybrid",
+			cpeModeEffective: "hybrid",
+		}
+		stampCPEModeMetadata(sbom, opts)
+		if got := sbom.Metadata.Properties[model.PropertyCPEMode]; got != "hybrid" {
+			t.Errorf("PropertyCPEMode = %q, want hybrid", got)
+		}
+		if _, present := sbom.Metadata.Properties[model.PropertyCPESourcesSkipped]; present {
+			t.Errorf("PropertyCPESourcesSkipped should be absent when no skip happened")
+		}
+	})
+	t.Run("nil opts is no-op", func(t *testing.T) {
+		sbom := &model.SBOM{}
+		stampCPEModeMetadata(sbom, nil)
+		if len(sbom.Metadata.Properties) != 0 {
+			t.Errorf("expected empty properties on nil opts, got %v",
+				sbom.Metadata.Properties)
+		}
+	})
+}
+
+// TestShouldFailFastOnAnonymousNVDInHybrid pins the strict
+// counterpart predicate added by S4 Task 4. Mirror cases of the
+// graceful skip matrix above; the predicate fires under
+// ModeHybrid / ModeOnline (strict) without an API key on workloads
+// above the threshold.
+func TestShouldFailFastOnAnonymousNVDInHybrid(t *testing.T) {
+	cases := []struct {
+		name       string
+		mode       cpesources.Mode
+		key        string
+		components int
+		want       bool
+	}{
+		{"hybrid + no key + above threshold", cpesources.ModeHybrid, "", nvdHybridSkipThreshold + 1, true},
+		{"online (alias) + no key + above", cpesources.ModeOnline, "", 6406, true},
+		{"hybrid + no key + at threshold", cpesources.ModeHybrid, "", nvdHybridSkipThreshold, false},
+		{"hybrid + no key + small workload", cpesources.ModeHybrid, "", 10, false},
+		{"hybrid + key + above", cpesources.ModeHybrid, "set", 6406, false},
+		{"auto + no key + above", cpesources.ModeAuto, "", 6406, false},
+		{"offline + no key + above", cpesources.ModeOffline, "", 6406, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shouldFailFastOnAnonymousNVDInHybrid(tc.mode, tc.key, tc.components)
+			if got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
