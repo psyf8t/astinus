@@ -117,6 +117,29 @@ public CLI / output surface.
 
 ### Added
 
+- **Layered base-image chain resolution.** Run #4 measured
+  B-airflow origin accuracy at 65 % (13/20): the 7 mismatches were
+  deb packages installed by the airflow Dockerfile on top of
+  `python:3.13-slim-bookworm` (libpq5, libsasl2-2, FreeType libs)
+  that Astinus's single-level base detection swept into the
+  `base-image` bucket. `python:3.13-slim-bookworm` is itself layered
+  on `debian:bookworm-slim`; treating "anything in detected base" as
+  one bucket loses the nuance between python-slim-introduced
+  packages and parent-debian-inherited packages. New
+  `KnownBaseEntry.ParentBase` + `AddedPackages` JSON fields (both
+  `omitempty` — backwards-compat). New `BaseChain` type +
+  `AutoDetector.DetectChain` walks the `parent_base` link up to 5
+  levels (cycle-safe). The basediff enricher stamps
+  `astinus:basediff:chain-depth` + `astinus:basediff:chain:<N>` on
+  SBOM metadata (0 = most-specific). Components classified
+  `OriginBaseImage` whose name appears in a chain level's
+  `AddedPackages` get `astinus:origin:base-level` (integer string)
+  + `astinus:origin:base-ref` (claiming level's ImageRef).
+  S6-T4 is visibility-only: the chain layer does NOT override
+  Origin classifications, only annotates them. The strict-override
+  mode + complete `AddedPackages` curation toolchain
+  (`scripts/update-known-bases.go`) land in Sprint 7. See ADR-0061.
+
 - **Actionable `--base auto` FallbackReason on unknown bases.**
   Pre-S6 the no-match diagnostic was a bare
   `"no known base for X Y"` blurb. Post-S6 the SBOM-stamped

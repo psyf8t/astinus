@@ -120,6 +120,7 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 
 	if e.runContentStrategy(ctx, logger, sbom, bundle, baseBundle, baseRef) {
 		stampStrategy(sbom, "content")
+		applyChain(sbom, e.resolveChain(ctx, bundle, baseRef))
 		return nil
 	}
 
@@ -147,7 +148,36 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 
 	stampOrigin(sbom, diff)
 	stampStrategy(sbom, "path-fallback")
+	applyChain(sbom, e.resolveChain(ctx, bundle, baseRef))
 	return nil
+}
+
+// resolveChain runs DetectChain to surface the layered base
+// hierarchy. Returns an empty (non-nil) BaseChain when the
+// detector isn't configured (label-based / ModeExplicit paths
+// reach here too — they have an immediate base ref but no
+// detector). The chain is used downstream by applyChain to stamp
+// chain-depth + per-level metadata. S6 Task 4 / ADR-0061.
+func (e *Enricher) resolveChain(ctx context.Context, bundle *image.Bundle, baseRef string) *BaseChain {
+	if e.detector == nil || e.detector.known == nil {
+		// Label-based / explicit paths still get a depth=0
+		// stamp + a chain:0 entry naming the immediate base, so
+		// downstream consumers see a uniform shape across modes.
+		return &BaseChain{Origin: &AutoDetectionResult{BaseImageRef: baseRef}}
+	}
+	chain, err := e.detector.DetectChain(ctx, bundle.Image)
+	if err != nil || chain == nil {
+		return &BaseChain{Origin: &AutoDetectionResult{BaseImageRef: baseRef}}
+	}
+	// If the immediate base ref came from the label-based path,
+	// DetectChain may have produced an empty Levels — seed the
+	// chain with the labeled ref so chain:0 metadata still lands.
+	if len(chain.Levels) == 0 && baseRef != "" {
+		if entry := e.detector.known.FindByRef(baseRef); entry != nil {
+			chain.Levels = []*KnownBaseEntry{entry}
+		}
+	}
+	return chain
 }
 
 // runContentStrategy executes the content-addressable diff. Returns

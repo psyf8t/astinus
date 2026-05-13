@@ -159,12 +159,13 @@ func TestKnownBases_LookupByOSRelease(t *testing.T) {
 		{"alpine", "3.20", 1},
 		{"alpine", "3.20.6", 1}, // prefix-matches
 		{"alpine", "99.0", 0},
-		// debian:12 entries: debian:12-slim,
-		// gcr.io/distroless/base-debian12,
-		// python:3.12-slim-bookworm, python:3.13-slim-bookworm.
-		// S6 Task 3 added the two python:slim entries.
-		{"debian", "12", 4},
-		{"debian", "12.5", 4},
+		// debian:12 entries: debian:12-slim, debian:bookworm-slim,
+		// gcr.io/distroless/base-debian12, python:3.12-slim-bookworm,
+		// python:3.13-slim-bookworm. S6 Task 3 added the two
+		// python:slim entries; S6 Task 4 added debian:bookworm-slim
+		// (parent target for python:slim's parent_base link).
+		{"debian", "12", 5},
+		{"debian", "12.5", 5},
 		// S6 Task 3 added debian 13 (trixie): debian:13-slim,
 		// debian:trixie-slim, python:3.13-slim-trixie.
 		{"debian", "13", 3},

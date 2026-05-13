@@ -92,6 +92,17 @@
       ]
     },
     {
+      "id": "debian",
+      "version_id": "12",
+      "image_ref": "debian:bookworm-slim",
+      "sample_file_paths": [
+        "etc/debian_version",
+        "etc/apt/sources.list.d/debian.sources",
+        "var/lib/dpkg/status",
+        "etc/os-release"
+      ]
+    },
+    {
       "id": "ubuntu",
       "version_id": "20.04",
       "image_ref": "ubuntu:20.04",
@@ -192,34 +203,64 @@
       "id": "debian",
       "version_id": "12",
       "image_ref": "python:3.12-slim-bookworm",
+      "parent_base": "debian:bookworm-slim",
       "sample_file_paths": [
         "etc/debian_version",
         "var/lib/dpkg/status",
         "usr/local/bin/python3",
         "etc/os-release"
+      ],
+      "added_packages": [
+        "libpython3.12",
+        "libpython3.12-minimal",
+        "libpython3.12-stdlib",
+        "python3.12",
+        "python3.12-minimal",
+        "ca-certificates",
+        "libssl3"
       ]
     },
     {
       "id": "debian",
       "version_id": "12",
       "image_ref": "python:3.13-slim-bookworm",
+      "parent_base": "debian:bookworm-slim",
       "sample_file_paths": [
         "etc/debian_version",
         "var/lib/dpkg/status",
         "usr/local/bin/python3",
         "etc/os-release"
+      ],
+      "added_packages": [
+        "libpython3.13",
+        "libpython3.13-minimal",
+        "libpython3.13-stdlib",
+        "python3.13",
+        "python3.13-minimal",
+        "ca-certificates",
+        "libssl3"
       ]
     },
     {
       "id": "debian",
       "version_id": "13",
       "image_ref": "python:3.13-slim-trixie",
+      "parent_base": "debian:trixie-slim",
       "sample_file_paths": [
         "etc/debian_version",
         "etc/apt/sources.list.d/debian.sources",
         "var/lib/dpkg/status",
         "usr/local/bin/python3",
         "etc/os-release"
+      ],
+      "added_packages": [
+        "libpython3.13",
+        "libpython3.13-minimal",
+        "libpython3.13-stdlib",
+        "python3.13",
+        "python3.13-minimal",
+        "ca-certificates",
+        "libssl3"
       ]
     },
     {

@@ -23,11 +23,30 @@ var knownBasesBytes []byte
 // paths the detector uses for presence checks; future schema
 // versions will add per-arch content-hash fingerprints for stronger
 // matching (deferred — see ADR-0044 §"Follow-up work"). S4 Task 6.
+//
+// S6 Task 4 (ADR-0061) added two layered-base-chain fields:
+//
+//   - ParentBase: the image_ref of the parent base when this entry
+//     is itself a layered image (e.g. python:3.13-slim-bookworm
+//     stacks on debian:bookworm-slim). Empty for standalone bases
+//     (alpine, debian:slim, ubuntu).
+//   - AddedPackages: the list of OS-package NAMES this layer
+//     contributes ON TOP OF its ParentBase. Used by the chain-aware
+//     classifier to decide "did this base level add the component
+//     or did its parent". Empty when ParentBase is empty
+//     (standalone base) or when the curated list hasn't been
+//     populated yet (forward-prep entries; the chain resolver
+//     still walks the parent_base link).
+//
+// Both fields are JSON-omitempty so older catalogue snapshots
+// without them stay parseable.
 type KnownBaseEntry struct {
 	ID              string   `json:"id"`
 	VersionID       string   `json:"version_id"`
 	ImageRef        string   `json:"image_ref"`
 	SampleFilePaths []string `json:"sample_file_paths"`
+	ParentBase      string   `json:"parent_base,omitempty"`
+	AddedPackages   []string `json:"added_packages,omitempty"`
 }
 
 // KnownBases is the in-memory representation of the bundled
@@ -131,6 +150,25 @@ func (k *KnownBases) UniqueDistroIDs() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// FindByRef returns the (first-seen) catalogue entry whose ImageRef
+// matches ref exactly. Returns nil when ref isn't catalogued. Used
+// by the layered-chain resolver to walk a `parent_base` link in
+// constant time per step. S6 Task 4 / ADR-0061.
+func (k *KnownBases) FindByRef(ref string) *KnownBaseEntry {
+	if k == nil || ref == "" {
+		return nil
+	}
+	for i := range k.entries {
+		if k.entries[i].ImageRef == ref {
+			// Return a pointer into the entries slice; the
+			// resolver only reads, so a defensive copy isn't
+			// needed (and would inflate every chain walk).
+			return &k.entries[i]
+		}
+	}
+	return nil
 }
 
 // VersionsForDistro returns the sorted, deduplicated list of
