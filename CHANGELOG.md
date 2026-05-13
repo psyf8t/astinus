@@ -13,6 +13,25 @@ public CLI / output surface.
 
 ### Fixed
 
+- **Eliminated remaining ~60 `pkg:generic/<sonamename>` phantom
+  rows from the untracked enricher.** ADR-0038 (S4 Task 0)
+  kept DT_SONAME as the one ELF identity signal worth trusting;
+  the run-#3 benchmark on a real Grafana image proved that
+  assumption wrong. `libcrypto.so.3` → SONAME → `crypto` doesn't
+  tell us whether the binary is OpenSSL, LibreSSL, BoringSSL,
+  AWS-LC, or wolfSSL — every option ships the same SONAME.
+  Resulting `pkg:generic/crypto`, `pkg:generic/cap`,
+  `pkg:generic/cares`, `pkg:generic/brotlicommon`,
+  `pkg:generic/brotlidec`, `pkg:generic/iconv`,
+  `pkg:generic/curl` (and ~50 others) didn't match anything in
+  NVD and dragged `addition_precision` to 0.42 on the run-#3
+  benchmark. `ELFLibraryExtractor.Extract` now returns empty
+  Identity unconditionally; library-shaped paths surface as
+  `astinus:evidence-level = observed` rows the same as
+  executables already do. The right home for ELF library
+  identity is the upstream package manager (apk / dpkg / rpm),
+  which Syft already catalogs reliably. (ADR-0048, S5 Task 1.)
+
 - **Restored primary CPE for Go standard library components.**
   The ADR-0042 per-ecosystem demotion was over-broad: it sent
   every `pkg:golang/*` row to `astinus:cpe:evidence`, including

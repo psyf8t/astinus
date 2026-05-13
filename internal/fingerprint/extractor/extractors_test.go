@@ -197,18 +197,35 @@ func TestELFExtractorReturnsEmptyForBareELF(t *testing.T) {
 	}
 }
 
-// S4 Task 0: an ELF binary with NO SONAME must yield empty Identity
-// even when its filename looks like a `.so` library or a known busybox
-// applet. Earlier revisions fell back to `basename(file.Path)`, which
-// fabricated `pkg:generic/<basename>` rows on stripped binaries.
-func TestELFExtractorNoBasenameFallbackWithoutSoname(t *testing.T) {
-	body := buildMinimalELF(t) // no .dynamic section → no SONAME
+// S5 Task 1 (replaces S4 Task 0's narrower contract): every ELF
+// input — with or without DT_SONAME — must yield empty Identity.
+// SONAME alone doesn't anchor a verifiable package identity
+// (`libcrypto.so.3` → `crypto` doesn't tell us OpenSSL vs LibreSSL
+// vs BoringSSL), and a real Grafana run-#3 benchmark saw ~60 such
+// SONAME-derived phantom rows pile up against
+// `addition_precision`. ADR-0048.
+//
+// `buildMinimalELF` already produces an ELF without `.dynamic`
+// (no SONAME); the contract is identical whether or not the input
+// has one, so this test pins the broader S5 Task 1 outcome — every
+// path through Extract returns empty.
+func TestELFExtractorAlwaysReturnsEmpty(t *testing.T) {
+	body := buildMinimalELF(t)
 	cases := []string{
-		"opt/lib/libssl.so.3",      // looks like a library
-		"usr/bin/busybox",          // a stripped multi-call binary
-		"usr/local/bin/crypto",     // openssl helper basename
-		"usr/local/bin/myfakebash", // busybox symlink target
-		"usr/local/bin/c_rehash",   // openssl script wrapper
+		// S4 Task 0 cases — stripped binaries without SONAME.
+		"opt/lib/libssl.so.3",
+		"usr/bin/busybox",
+		"usr/local/bin/crypto",
+		"usr/local/bin/myfakebash",
+		"usr/local/bin/c_rehash",
+		// S5 Task 1 additions — paths shaped like real shared
+		// libraries (would historically have produced
+		// `pkg:generic/<sonamename>` via the SONAME path).
+		"usr/lib/libcrypto.so.3",
+		"usr/lib/libcap.so.2",
+		"usr/lib/libcares.so.2",
+		"usr/lib/libbrotlicommon.so.1",
+		"usr/lib/libcurl.so.4",
 	}
 	for _, p := range cases {
 		t.Run(p, func(t *testing.T) {
@@ -220,7 +237,7 @@ func TestELFExtractorNoBasenameFallbackWithoutSoname(t *testing.T) {
 				t.Fatalf("Extract(%s): %v", p, err)
 			}
 			if !id.IsEmpty() {
-				t.Errorf("Identity for %s = %+v, want empty (no SONAME)", p, id)
+				t.Errorf("Identity for %s = %+v, want empty (S5 Task 1)", p, id)
 			}
 		})
 	}
