@@ -42,6 +42,7 @@ import (
 	"github.com/psyf8t/astinus/internal/sbom/spdx"
 	"github.com/psyf8t/astinus/internal/sign"
 	"github.com/psyf8t/astinus/internal/telemetry"
+	"github.com/psyf8t/astinus/internal/vex"
 )
 
 // Enrich exit codes — extends the spec section 6.4 enumeration.
@@ -221,6 +222,13 @@ type enrichOptions struct {
 	// values are one of `critical`, `high`, `medium`, `low`,
 	// `info`. PRSD-Task-7.
 	failOn string
+	// vexFiles is the list of VEX documents to apply during
+	// compliance evaluation. Multiple files merge into a single
+	// store; format (OpenVEX vs CycloneDX VEX) is detected by
+	// content. Statements with `not_affected` / `fixed` status
+	// suppress matching CVE-shaped compliance findings. S6 Task
+	// 6 / ADR-0063.
+	vexFiles []string
 	// metricsOutput controls how the in-process Prometheus
 	// registry is exposed at the end of the run. Forms:
 	//
@@ -403,6 +411,12 @@ add the others.`,
 		"Override the cosign binary lookup (default: PATH).")
 	flags.StringVar(&opts.failOn, "fail-on", "",
 		"Exit non-zero when any compliance finding meets this severity: critical | high | medium | low | info (default: never fail)")
+	flags.StringSliceVar(&opts.vexFiles, "vex", nil,
+		"Path to a VEX document. May be repeated; multiple files merge "+
+			"into one store. Statements with status `not_affected` or "+
+			"`fixed` suppress matching CVE-shaped compliance findings. "+
+			"OpenVEX and CycloneDX VEX formats are accepted (detected by "+
+			"content). See ADR-0063.")
 	flags.StringVar(&opts.metricsOutput, "metrics-output", "",
 		"Where to emit Prometheus text-format metrics at end of run: stdout | stderr | file:/path (default: disabled)")
 	flags.StringVar(&opts.tracingEndpoint, "tracing-endpoint", "",
@@ -624,35 +638,170 @@ func runSigningStep(ctx context.Context, opts *enrichOptions, logger *slog.Logge
 // evaluateComplianceGate enforces `--fail-on <severity>`. Returns
 // nil when the flag was empty or no finding crossed the threshold;
 // otherwise returns a non-zero ExitComplianceFail error.
+//
+// S6 Task 6: when `--vex <file>` was supplied, the loaded VEX store
+// suppresses CVE-shaped findings (RuleID `CVE-...`) whose
+// (vulnID, componentPURL) matches a `not_affected` or `fixed`
+// statement. Suppressed findings stamp
+// `astinus:vex:suppressed:<CVE-ID>` on SBOM metadata so downstream
+// consumers see what was filtered + why. ADR-0063.
 func evaluateComplianceGate(ctx context.Context, opts *enrichOptions, sbom *model.SBOM, logger *slog.Logger) error {
-	if opts.failOn == "" {
+	if opts.failOn == "" && len(opts.vexFiles) == 0 {
 		return nil
 	}
+	vexStore, err := vex.LoadStore(opts.vexFiles)
+	if err != nil {
+		return newExitError(ExitInvalidArgs,
+			fmt.Errorf("--vex: %w", err))
+	}
+	if opts.failOn == "" {
+		// VEX was supplied but no gate threshold — still apply
+		// suppression stamps so SBOM consumers see the surface.
+		findings := compliance.New().Findings(ctx, sbom)
+		applyVEXSuppression(sbom, findings, vexStore, logger)
+		return nil
+	}
+
 	floor, ok := policy.ParseSeverity(strings.ToLower(strings.TrimSpace(opts.failOn)))
 	if !ok {
 		return newExitError(ExitInvalidArgs, fmt.Errorf("--fail-on: unknown severity %q", opts.failOn))
 	}
 	enricher := compliance.New()
 	findings := enricher.Findings(ctx, sbom)
+	suppressedIDs := applyVEXSuppression(sbom, findings, vexStore, logger)
+
 	hits := 0
 	for _, f := range findings {
-		if f.Severity.AtLeast(floor) {
-			hits++
+		if !f.Severity.AtLeast(floor) {
+			continue
 		}
+		if _, ok := suppressedIDs[f.RuleID]; ok {
+			continue
+		}
+		hits++
 	}
 	if hits == 0 {
 		logger.Info("compliance.gate.passed",
 			"floor", floor.String(),
-			"findings_total", len(findings))
+			"findings_total", len(findings),
+			"vex_suppressed", len(suppressedIDs))
 		return nil
 	}
 	logger.Warn("compliance.gate.failed",
 		"floor", floor.String(),
 		"findings_at_or_above_floor", hits,
-		"findings_total", len(findings))
+		"findings_total", len(findings),
+		"vex_suppressed", len(suppressedIDs))
 	return newExitError(ExitComplianceFail,
 		fmt.Errorf("compliance: %d finding(s) at or above %q severity (run with --fail-on=\"\" to disable the gate)",
 			hits, floor.String()))
+}
+
+// applyVEXSuppression walks findings, identifies CVE-shaped RuleIDs
+// (prefix `CVE-`), looks up matching components by BOMRef, and for
+// each (vulnID, componentPURL) pair queries the VEX store. Findings
+// whose effect Suppresses() (status not_affected / fixed) stamp the
+// SBOM-level `astinus:vex:suppressed:<CVE>` property and contribute
+// to the returned ID set the caller subtracts from the gate count.
+// Empty store → no-op. ADR-0063.
+func applyVEXSuppression(sbom *model.SBOM, findings []policy.Finding, store *vex.Store, logger *slog.Logger) map[string]struct{} {
+	suppressed := map[string]struct{}{}
+	if store == nil || store.Len() == 0 || sbom == nil {
+		return suppressed
+	}
+	purlByRef := buildBOMRefPURLMap(sbom)
+	for _, f := range findings {
+		if !isCVERuleID(f.RuleID) {
+			continue
+		}
+		purl := purlByRef[f.Component]
+		if purl == "" {
+			continue
+		}
+		effect, ok := store.Lookup(f.RuleID, purl)
+		if !ok || !effect.Suppresses() {
+			continue
+		}
+		suppressed[f.RuleID] = struct{}{}
+		stampVEXSuppression(sbom, f.RuleID, effect)
+		logger.Warn("compliance.vex.suppressed",
+			"cve", f.RuleID,
+			"component", f.Component,
+			"purl", purl,
+			"status", string(effect.Status),
+			"justification", string(effect.Justification),
+			"source", effect.Source)
+	}
+	if len(suppressed) > 0 {
+		stampVEXSummary(sbom, len(suppressed), store.Sources())
+	}
+	return suppressed
+}
+
+// isCVERuleID reports whether RuleID looks like a CVE identifier
+// (`CVE-YYYY-NNNN...`). The VEX suppression layer applies only to
+// CVE-shaped findings; compliance findings keyed on other rule
+// IDs (`NTIA-VERSION`, etc.) flow through unchanged.
+func isCVERuleID(id string) bool {
+	return strings.HasPrefix(id, "CVE-") && len(id) > 4
+}
+
+// buildBOMRefPURLMap walks the SBOM and builds a BOMRef → PURL
+// lookup so the VEX layer can resolve a Finding's `Component`
+// field (which holds the BOMRef) to a PURL for store.Lookup. Nested
+// SubComponents flatten into the same map. S6 Task 6.
+func buildBOMRefPURLMap(sbom *model.SBOM) map[string]string {
+	out := map[string]string{}
+	var walk func([]model.Component)
+	walk = func(comps []model.Component) {
+		for i := range comps {
+			c := comps[i]
+			if c.BOMRef != "" && c.PURL != "" {
+				out[c.BOMRef] = c.PURL
+			}
+			if len(c.SubComponents) > 0 {
+				walk(c.SubComponents)
+			}
+		}
+	}
+	walk(sbom.Components)
+	return out
+}
+
+// stampVEXSuppression writes the per-vulnerability metadata stamp
+// `astinus:vex:suppressed:<CVE> = <status>:<justification>` so
+// downstream SBOM consumers see which finding was filtered out and
+// why. Stamps are idempotent — re-running compliance evaluation
+// overwrites with the latest values.
+func stampVEXSuppression(sbom *model.SBOM, cve string, effect *vex.Effect) {
+	if sbom == nil || effect == nil {
+		return
+	}
+	if sbom.Metadata.Properties == nil {
+		sbom.Metadata.Properties = map[string]string{}
+	}
+	value := string(effect.Status)
+	if effect.Justification != "" {
+		value = value + ":" + string(effect.Justification)
+	}
+	sbom.Metadata.Properties["astinus:vex:suppressed:"+cve] = value
+}
+
+// stampVEXSummary writes the aggregate SBOM-level stamps:
+// `astinus:vex:total-suppressed` (count) and
+// `astinus:vex:sources` (comma-joined file paths the suppressing
+// effects came from). Operators see the totals without grepping.
+func stampVEXSummary(sbom *model.SBOM, count int, sources []string) {
+	if sbom == nil {
+		return
+	}
+	if sbom.Metadata.Properties == nil {
+		sbom.Metadata.Properties = map[string]string{}
+	}
+	sbom.Metadata.Properties["astinus:vex:total-suppressed"] = fmt.Sprintf("%d", count)
+	if len(sources) > 0 {
+		sbom.Metadata.Properties["astinus:vex:sources"] = strings.Join(sources, ",")
+	}
 }
 
 // loadSBOM reads from stdin (path == "-") or a file, auto-detects the

@@ -145,6 +145,25 @@ public CLI / output surface.
 
 ### Added
 
+- **VEX (Vulnerability Exploitability eXchange) support.** New
+  `--vex <file>` CLI flag (repeatable) accepts OpenVEX 0.2 and
+  CycloneDX 1.5 VEX documents (format detected by content). The
+  compliance gate suppresses CVE-shaped findings whose
+  `(vulnID, componentPURL)` matches a `not_affected` or `fixed`
+  statement in the loaded VEX store. SBOM metadata stamps
+  `astinus:vex:suppressed:<CVE> = <status>:<justification>` per
+  suppression, `astinus:vex:total-suppressed` (count), and
+  `astinus:vex:sources` (comma-joined file paths) make the
+  decisions auditable from the SBOM alone. PURL matching
+  supports exact equality + `@*` wildcard on either side;
+  version-range matching is deferred to a future task. Every
+  suppression emits a `compliance.vex.suppressed` WARN log
+  carrying cve / component / purl / status / justification /
+  source. Non-CVE compliance findings (NTIA / EU-CRA) flow
+  through unchanged. New `internal/vex/` package exposes
+  `Store`, `Effect`, `LoadStore`, `DetectFormat` for future
+  extensions. See ADR-0063.
+
 - **Layered base-image chain resolution.** Run #4 measured
   B-airflow origin accuracy at 65 % (13/20): the 7 mismatches were
   deb packages installed by the airflow Dockerfile on top of
