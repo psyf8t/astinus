@@ -145,6 +145,30 @@ public CLI / output surface.
 
 ### Added
 
+- **License policy — SPDX-based allow/deny gate.** Three new
+  flags drive the gate without YAML authoring: `--license-allow
+  <SPDX-ID>` (repeatable), `--license-deny <SPDX-ID>`
+  (repeatable, higher precedence than allow), and
+  `--license-require-known` (rejects empty / unparseable
+  license declarations). Empty allow+deny + require-known=false
+  ⇒ gate disabled. Deny takes precedence over allow: a
+  `MIT OR GPL-3.0-only` row fails when GPL-3.0-only is in deny,
+  even if MIT is in allow ("if it CAN be released as GPL, treat
+  it as GPL"). Components failing the gate become synthetic
+  `LICENSE-VIOLATION-<sanitized-purl>` findings at severity
+  High; SBOM metadata stamps `astinus:license:gate-mode`,
+  `:total-evaluated`, `:total-denied`, `:total-unknown` (always)
+  + per-violation `astinus:license:denied:<purl>` and
+  `astinus:license:unknown:<purl>` (per row). New
+  `internal/license/` package with `EvaluateComponent` and a
+  minimal SPDX expression parser (`extractSPDXIDs` handles
+  OR/AND/WITH + parentheses; covers every license expression in
+  the observed SBOM park; no new dependency). Composes with
+  Sprint 6 Task 6 VEX (per-vuln) and Task 7 policy framework
+  (per-rule) — Stage 14 trifecta complete. See ADR-0065.
+
+### Added
+
 - **Operator-supplied YAML policy framework.** New `--policy
   <file>` CLI flag (repeatable; policies stack in invocation
   order). YAML rules carry component matchers (`purl_matches`

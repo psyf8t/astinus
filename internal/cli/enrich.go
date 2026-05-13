@@ -33,6 +33,7 @@ import (
 	"github.com/psyf8t/astinus/internal/image/auth"
 	"github.com/psyf8t/astinus/internal/image/source"
 	"github.com/psyf8t/astinus/internal/image/transport"
+	"github.com/psyf8t/astinus/internal/license"
 	"github.com/psyf8t/astinus/internal/output"
 	"github.com/psyf8t/astinus/internal/policy"
 	compliancepolicy "github.com/psyf8t/astinus/internal/policy/builtin/compliance"
@@ -236,6 +237,14 @@ type enrichOptions struct {
 	// suppress matching CVE findings; warn rules stamp metadata
 	// only. Multiple files stack in invocation order.
 	policyFiles []string
+	// licenseAllow + licenseDeny + licenseRequireKnown drive
+	// the S6 Task 8 license gate (ADR-0065). Empty allow+deny
+	// AND !requireKnown disables the gate. Deny takes precedence
+	// over allow. Components failing the gate become synthetic
+	// LICENSE-VIOLATION findings the compliance gate counts.
+	licenseAllow        []string
+	licenseDeny         []string
+	licenseRequireKnown bool
 	// metricsOutput controls how the in-process Prometheus
 	// registry is exposed at the end of the run. Forms:
 	//
@@ -431,6 +440,20 @@ add the others.`,
 			"version_below, has_property) + finding matchers "+
 			"(id_prefix, severity), composition (all/any/not), and "+
 			"action types deny / allow / warn. See ADR-0064.")
+	flags.StringSliceVar(&opts.licenseAllow, "license-allow", nil,
+		"SPDX license identifier(s) explicitly allowed. When set, "+
+			"components without a license that resolves to one of "+
+			"these SPDX IDs fail the gate. May be repeated. Examples: "+
+			"MIT, Apache-2.0, BSD-3-Clause. See ADR-0065.")
+	flags.StringSliceVar(&opts.licenseDeny, "license-deny", nil,
+		"SPDX license identifier(s) explicitly denied. Higher precedence "+
+			"than --license-allow (a dual-licensed `MIT OR GPL-3.0-only` "+
+			"row fails when GPL-3.0-only is in deny, even if MIT is in "+
+			"allow). May be repeated. See ADR-0065.")
+	flags.BoolVar(&opts.licenseRequireKnown, "license-require-known", false,
+		"Reject components with empty / unparseable license declarations. "+
+			"Default: components without a known license pass with a WARN. "+
+			"Procurement-compliance scenarios usually enable this. ADR-0065.")
 	flags.StringVar(&opts.metricsOutput, "metrics-output", "",
 		"Where to emit Prometheus text-format metrics at end of run: stdout | stderr | file:/path (default: disabled)")
 	flags.StringVar(&opts.tracingEndpoint, "tracing-endpoint", "",
@@ -660,7 +683,12 @@ func runSigningStep(ctx context.Context, opts *enrichOptions, logger *slog.Logge
 // `astinus:vex:suppressed:<CVE-ID>` on SBOM metadata so downstream
 // consumers see what was filtered + why. ADR-0063.
 func evaluateComplianceGate(ctx context.Context, opts *enrichOptions, sbom *model.SBOM, logger *slog.Logger) error {
-	if opts.failOn == "" && len(opts.vexFiles) == 0 && len(opts.policyFiles) == 0 {
+	licenseOpts := license.Options{
+		Allow:        opts.licenseAllow,
+		Deny:         opts.licenseDeny,
+		RequireKnown: opts.licenseRequireKnown,
+	}
+	if opts.failOn == "" && len(opts.vexFiles) == 0 && len(opts.policyFiles) == 0 && !licenseOpts.IsEnabled() {
 		return nil
 	}
 	vexStore, err := vex.LoadStore(opts.vexFiles)
@@ -677,10 +705,12 @@ func evaluateComplianceGate(ctx context.Context, opts *enrichOptions, sbom *mode
 	findings := enricher.Findings(ctx, sbom)
 	suppressedIDs := applyVEXSuppression(sbom, findings, vexStore, logger)
 	policyAllowed, policyDenied := applyPolicies(sbom, &findings, policies, logger)
+	licenseDenied := applyLicenseGate(sbom, &findings, licenseOpts, logger)
 
 	if opts.failOn == "" {
-		// Decorate-only run: VEX + policy stamps land, no gate
-		// threshold to enforce.
+		// Decorate-only run: VEX + policy + license stamps land,
+		// no gate threshold to enforce.
+		_ = licenseDenied
 		return nil
 	}
 
@@ -708,7 +738,8 @@ func evaluateComplianceGate(ctx context.Context, opts *enrichOptions, sbom *mode
 			"findings_total", len(findings),
 			"vex_suppressed", len(suppressedIDs),
 			"policy_allowed", len(policyAllowed),
-			"policy_denied", len(policyDenied))
+			"policy_denied", len(policyDenied),
+			"license_denied", licenseDenied)
 		return nil
 	}
 	logger.Warn("compliance.gate.failed",
@@ -717,10 +748,203 @@ func evaluateComplianceGate(ctx context.Context, opts *enrichOptions, sbom *mode
 		"findings_total", len(findings),
 		"vex_suppressed", len(suppressedIDs),
 		"policy_allowed", len(policyAllowed),
-		"policy_denied", len(policyDenied))
+		"policy_denied", len(policyDenied),
+		"license_denied", licenseDenied)
 	return newExitError(ExitComplianceFail,
 		fmt.Errorf("compliance: %d finding(s) at or above %q severity (run with --fail-on=\"\" to disable the gate)",
 			hits, floor.String()))
+}
+
+// applyLicenseGate walks every component and runs the SPDX-based
+// license gate (S6 Task 8 / ADR-0065). Returns the count of
+// denied components. For each denial, a synthetic
+// LICENSE-VIOLATION finding is appended to *findings (severity
+// High; the compliance gate counts it like a regular hit). For
+// each Unknown / Denied outcome, an `astinus:license:*` SBOM
+// metadata stamp lands. Returns 0 when the license gate is
+// disabled (opts.IsEnabled() == false).
+func applyLicenseGate(sbom *model.SBOM, findings *[]policy.Finding, opts license.Options, logger *slog.Logger) int {
+	if sbom == nil || findings == nil || !opts.IsEnabled() {
+		return 0
+	}
+	totalEvaluated := 0
+	totalDenied := 0
+	totalUnknown := 0
+	var walk func([]model.Component)
+	walk = func(comps []model.Component) {
+		for i := range comps {
+			c := &comps[i]
+			totalEvaluated++
+			dec := license.EvaluateComponent(c, opts)
+			switch dec.Decision {
+			case license.ActionDeny:
+				totalDenied++
+				appendLicenseFinding(findings, c, dec)
+				stampLicenseDenied(sbom, c, dec)
+				logger.Error("compliance.license-denied",
+					"component", c.Name,
+					"purl", c.PURL,
+					"spdx_ids", dec.SPDXIDs,
+					"reason", dec.Reason)
+			case license.ActionUnknown:
+				totalUnknown++
+				stampLicenseUnknown(sbom, c, dec)
+				logger.Warn("compliance.license-unknown",
+					"component", c.Name,
+					"purl", c.PURL,
+					"reason", dec.Reason)
+			case license.ActionAllow:
+				// No stamp on allowed components — keeps the
+				// SBOM metadata surface bounded to violations.
+			}
+			if len(c.SubComponents) > 0 {
+				walk(c.SubComponents)
+			}
+		}
+	}
+	walk(sbom.Components)
+	stampLicenseSummary(sbom, opts, totalEvaluated, totalDenied, totalUnknown)
+	return totalDenied
+}
+
+// appendLicenseFinding synthesises a `LICENSE-VIOLATION-<sanitized>`
+// finding so the compliance gate counts the license-denied
+// component like a regular finding. The sanitised tail keeps the
+// finding ID human-readable + unique per component.
+func appendLicenseFinding(findings *[]policy.Finding, c *model.Component, dec license.Decision) {
+	ruleID := "LICENSE-VIOLATION"
+	if c.PURL != "" {
+		ruleID = ruleID + "-" + sanitiseRuleIDTail(c.PURL)
+	} else if c.Name != "" {
+		ruleID = ruleID + "-" + sanitiseRuleIDTail(c.Name)
+	}
+	*findings = append(*findings, policy.Finding{
+		Severity:  policy.SeverityHigh,
+		RuleID:    ruleID,
+		Component: c.BOMRef,
+		Message:   dec.Reason,
+	})
+}
+
+// stampLicenseDenied writes `astinus:license:denied:<purl> =
+// <reason>` on SBOM metadata. Idempotent — re-evaluations
+// overwrite the latest reason.
+func stampLicenseDenied(sbom *model.SBOM, c *model.Component, dec license.Decision) {
+	key := licenseStampKey("astinus:license:denied:", c)
+	if key == "" {
+		return
+	}
+	if sbom.Metadata.Properties == nil {
+		sbom.Metadata.Properties = map[string]string{}
+	}
+	sbom.Metadata.Properties[key] = dec.Reason
+}
+
+// stampLicenseUnknown writes `astinus:license:unknown:<purl> =
+// <reason>` for operator-visible WARNs without gate effect.
+func stampLicenseUnknown(sbom *model.SBOM, c *model.Component, dec license.Decision) {
+	key := licenseStampKey("astinus:license:unknown:", c)
+	if key == "" {
+		return
+	}
+	if sbom.Metadata.Properties == nil {
+		sbom.Metadata.Properties = map[string]string{}
+	}
+	sbom.Metadata.Properties[key] = dec.Reason
+}
+
+// stampLicenseSummary writes the aggregate SBOM-level stamps:
+// `astinus:license:gate-mode` (describes the gate config),
+// `:total-evaluated`, `:total-denied`, `:total-unknown`. Always
+// runs when the gate was enabled (even with zero violations) so
+// CI pipelines can branch on the totals.
+func stampLicenseSummary(sbom *model.SBOM, opts license.Options, evaluated, denied, unknown int) {
+	if sbom == nil {
+		return
+	}
+	if sbom.Metadata.Properties == nil {
+		sbom.Metadata.Properties = map[string]string{}
+	}
+	sbom.Metadata.Properties["astinus:license:gate-mode"] = describeLicenseMode(opts)
+	sbom.Metadata.Properties["astinus:license:total-evaluated"] = fmt.Sprintf("%d", evaluated)
+	sbom.Metadata.Properties["astinus:license:total-denied"] = fmt.Sprintf("%d", denied)
+	sbom.Metadata.Properties["astinus:license:total-unknown"] = fmt.Sprintf("%d", unknown)
+}
+
+// describeLicenseMode renders a single-token summary of the gate
+// configuration: `allow` / `deny` / `allow+deny` / `require-known`
+// (combinations chained with `+`). Empty config returns "disabled"
+// — but applyLicenseGate short-circuits before this is called in
+// that case, so the value should never land in production output.
+func describeLicenseMode(opts license.Options) string {
+	parts := []string{}
+	if len(opts.Allow) > 0 {
+		parts = append(parts, "allow")
+	}
+	if len(opts.Deny) > 0 {
+		parts = append(parts, "deny")
+	}
+	if opts.RequireKnown {
+		parts = append(parts, "require-known")
+	}
+	if len(parts) == 0 {
+		return "disabled"
+	}
+	return strings.Join(parts, "+")
+}
+
+// licenseStampKey builds the SBOM metadata key for a component's
+// license stamp. Prefers PURL (stable, machine-readable); falls
+// back to BOMRef or Name. Returns "" when the component has none
+// of those — the stamp is dropped rather than synthesising a
+// nondeterministic key.
+func licenseStampKey(prefix string, c *model.Component) string {
+	if c == nil {
+		return ""
+	}
+	switch {
+	case c.PURL != "":
+		return prefix + c.PURL
+	case c.BOMRef != "":
+		return prefix + c.BOMRef
+	case c.Name != "":
+		return prefix + c.Name
+	}
+	return ""
+}
+
+// sanitiseRuleIDTail collapses characters that aren't safe in a
+// rule-ID context (operator-facing identifier; we want it to be
+// grep-friendly + unique). Lowercases; replaces non-alphanumeric
+// runs with `-`. Used only for the synthetic LICENSE-VIOLATION
+// finding's tail — production rule IDs are operator-supplied
+// and pass through unchanged.
+func sanitiseRuleIDTail(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	wasNonAlnum := false
+	for _, r := range s {
+		isAlnum := (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') ||
+			(r >= '0' && r <= '9')
+		if isAlnum {
+			if r >= 'A' && r <= 'Z' {
+				r += 'a' - 'A'
+			}
+			b.WriteRune(r)
+			wasNonAlnum = false
+			continue
+		}
+		if !wasNonAlnum {
+			b.WriteByte('-')
+			wasNonAlnum = true
+		}
+	}
+	out := b.String()
+	out = strings.Trim(out, "-")
+	if out == "" {
+		return "unknown"
+	}
+	return out
 }
 
 // applyPolicies walks every loaded policy and applies its rules to
