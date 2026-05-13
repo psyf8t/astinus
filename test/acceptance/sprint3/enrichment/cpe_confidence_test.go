@@ -136,15 +136,22 @@ func TestCPEConfidence_NoHardwareCPE_OnSoftwarePURL(t *testing.T) {
 
 	yq := findComponent(t, res.BOM, "yq")
 
-	// Primary CPE lives on the cdx.Component.CPE field (not on a
-	// property). The yq software CPE should win — it scores well
-	// above PrimaryMin while the hardware CPE is hard-rejected to
-	// confidence 0.05.
-	if yq.CPE == "" {
-		t.Fatal("yq has no primary CPE — enrichment failed entirely")
+	// S4 Task 3 (ADR-0042): the golang ecosystem policy is
+	// evidence-only — the yq software CPE that wins classification
+	// surfaces in `astinus:cpe:evidence` instead of yq.CPE. The
+	// hardware-CPE rejection contract is preserved: the linksys
+	// row must NOT leak into any visible field, regardless of
+	// whether the primary slot is populated or not.
+	primaryOrEvidence := yq.CPE
+	if primaryOrEvidence == "" {
+		primaryOrEvidence = propertyValue(yq, "astinus:cpe:evidence")
 	}
-	if strings.Contains(yq.CPE, ":h:") {
-		t.Errorf("primary CPE is hardware-type for software PURL: %s", yq.CPE)
+	if primaryOrEvidence == "" {
+		t.Fatal("yq has neither primary CPE nor astinus:cpe:evidence — " +
+			"enrichment failed entirely")
+	}
+	if strings.Contains(primaryOrEvidence, ":h:") {
+		t.Errorf("hardware-type CPE leaked into primary/evidence: %s", primaryOrEvidence)
 	}
 
 	// Walk all alternatives — none of them may be hardware-type.

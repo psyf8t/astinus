@@ -421,6 +421,15 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 		// silently dropped — air-gapped CI must fail loudly when
 		// the catalogue it pointed at can't be loaded.
 		// post-stage-13 review F-011.
+		//
+		// S4 Task 4: buildCPEEnricher returns an already-wrapped
+		// exitError (ExitCPESourceUnavailable=60) when --cpe-mode
+		// hybrid refuses to run. Preserve that semantic code
+		// instead of clobbering with ExitInvalidArgs.
+		var inner *exitError
+		if asExitError(err, &inner) {
+			return inner
+		}
 		return newExitError(ExitInvalidArgs, err)
 	}
 	pipeline := enrich.NewPipeline(logger, enrichers...)

@@ -13,6 +13,35 @@ public CLI / output surface.
 
 ### Added
 
+- **Sprint 4 acceptance suite (`test/acceptance/sprint4/`).**
+  Seven in-process tests across two sub-suites (`quality/`,
+  `ux/`) pin every Sprint 4 task's operator-facing contract via
+  the actual `astinus enrich` binary: no-phantom rows (T0),
+  golang CPEs as evidence-only with v-prefix stripped (T3),
+  `--cpe-mode auto` skip-with-metadata + `--cpe-mode hybrid`
+  exit-60 + `--cpe-mode online` deprecation warning (T4),
+  content-based base detection from os-release + scratch
+  fallback-reason stamp (T6). Build tag `acceptance`; full suite
+  hermetic + ≈ 50 s wall-clock on M-class arm64. Pinned-Grafana
+  real-image bundle (`gap_closure_rate` / `phantom_count` /
+  Grype-delta metric gates) explicitly deferred to a Sprint 5
+  follow-up — documented in `test/acceptance/sprint4/fixtures/README.md`.
+  (ADR-0046, S4 Task 7.)
+
+### Fixed
+
+- **Sprint 4 Task 7 surfaced and fixed an exit-code clobbering
+  bug.** `allEnrichers` was wrapping every error in
+  `newExitError(ExitInvalidArgs=2, err)`, including the
+  `ExitCPESourceUnavailable=60` exit code that
+  `buildCPEEnricher` returns for the strict `--cpe-mode hybrid`
+  fail-fast path. The S4 Task 4 acceptance test caught the
+  collision; the fix preserves any pre-coded `*exitError`
+  semantic code from the inner call instead of overwriting with
+  exit 2. (ADR-0046, S4 Task 7.)
+
+### Added
+
 - **Content-based base-image detection.** `--base auto` (the
   default) now falls back to reading `/etc/os-release` (or
   `usr/lib/os-release` / `etc/alpine-release`) when the target
