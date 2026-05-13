@@ -22,8 +22,9 @@
 //
 //   - MaxComponents (default 10000) stops the scan once the SBOM
 //     would otherwise blow up.
-//   - MaxFileBytes (default 256 MiB) is the per-file cap on bytes
-//     we hash / parse.
+//   - MaxFileBytes (default 2 GiB, S4 Task 5) is the per-file cap
+//     on bytes we hash / parse. Files over the cap are emitted as
+//     observed-only Components rather than aborting the walk.
 package untracked
 
 import (
@@ -33,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -55,8 +57,17 @@ const Name = "untracked"
 // Defaults — overridable via Options.
 const (
 	DefaultMaxComponents = 10000
-	DefaultMaxFileBytes  = 256 << 20 // 256 MiB
-	defaultMagicWindow   = 16
+	// DefaultMaxFileBytes is the per-file cap on bytes hashed +
+	// classified by the untracked enricher. S4 Task 5 raised the
+	// default from 256 MiB → 2 GiB after the 256 MiB ceiling
+	// aborted the walk on real production Go binaries (Grafana's
+	// 435 MB single-binary distribution) that arrive without a
+	// matching Syft `Evidence.Locations` entry to skip them via
+	// the redundancy filter. 2 GiB covers every Go / JVM / native
+	// app binary observed on public images and leaves a generous
+	// margin before pathological multi-GB blobs hit the cap.
+	DefaultMaxFileBytes = 2 << 30 // 2 GiB
+	defaultMagicWindow  = 16
 )
 
 // Options controls the enricher.
@@ -656,8 +667,19 @@ func logScanStats(s scanStats, matcherHits int) {
 // matcher task. ok=false for noise / config / static-archive
 // (skipped); err is for true I/O errors. Matcher.Lookup is no longer
 // called here — see runMatcherWorkers.
+//
+// S4 Task 5: when a file exceeds MaxFileBytes (rare on today's
+// raised 2 GiB default but still possible for multi-GB blobs) the
+// walk no longer aborts. Instead we drain the body, emit an
+// observed-only Component so the file appears in the SBOM inventory
+// for transparency, and continue. The pre-S4-Task-5 behaviour
+// surfaced as `Trivy input aborts on Grafana's 435 MB binary` on
+// real images.
 func (e *Enricher) processFile(ctx context.Context, fe layer.FileEntry, body io.Reader) (processResult, error) {
 	buf, err := readCapped(body, e.opts.MaxFileBytes)
+	if errors.Is(err, errFileTooLarge) {
+		return e.observedTooLargeResult(fe), nil
+	}
 	if err != nil {
 		return processResult{}, err
 	}
@@ -937,9 +959,15 @@ func applyMatch(c *model.Component, m matcher.Match) {
 	}
 }
 
+// errFileTooLarge is the sentinel readCapped returns when the body
+// exceeds MaxFileBytes. The caller distinguishes this from real I/O
+// errors so the walk can emit an observed-only Component and
+// continue instead of aborting. S4 Task 5.
+var errFileTooLarge = errors.New("untracked: file exceeds MaxFileBytes")
+
 // readCapped reads up to limit+1 bytes; if the input is longer it
-// returns an error (so the caller knows the file was over the cap).
-// limit < 0 means unlimited.
+// returns errFileTooLarge so the caller can branch. limit < 0
+// means unlimited.
 func readCapped(r io.Reader, limit int64) ([]byte, error) {
 	if limit < 0 {
 		return io.ReadAll(r)
@@ -949,7 +977,70 @@ func readCapped(r io.Reader, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("untracked: file exceeds MaxFileBytes (%d)", limit)
+		return nil, fmt.Errorf("%w (%d)", errFileTooLarge, limit)
 	}
 	return body, nil
+}
+
+// observedTooLargeResult builds the observed-only Component the
+// walk emits when a file exceeds MaxFileBytes. The Component
+// carries no hash (we stopped reading before the file ended) and
+// stamps `astinus:untracked:skipped-reason = file-exceeds-max-bytes`
+// so operators can audit why no identity was attempted. The result
+// is otherwise consistent with `buildBaseComponent` so downstream
+// passes (layer attribution, evidence-level inference) keep
+// working. S4 Task 5.
+func (e *Enricher) observedTooLargeResult(fe layer.FileEntry) processResult {
+	comp := model.Component{
+		BOMRef: "untracked-toolarge-" + sanitiseBOMRefPath(fe.Path),
+		Type:   model.ComponentTypeFile,
+		Name:   fe.Path,
+		Evidence: &model.Evidence{
+			Method:    "untracked-scan",
+			Locations: []model.EvidenceLocation{{Path: fe.Path}},
+		},
+		LayerInfo: &model.LayerInfo{
+			LayerDigest: fe.Layer.Digest,
+			LayerIndex:  fe.Layer.Index,
+			AddedBy:     fe.Layer.CreatedBy,
+		},
+		Properties: map[string]string{
+			"astinus:untracked:category":          "unknown",
+			"astinus:untracked:skipped-reason":    "file-exceeds-max-bytes",
+			"astinus:untracked:max-file-bytes":    strconv.FormatInt(e.opts.MaxFileBytes, 10),
+			"astinus:untracked:header-size-bytes": strconv.FormatInt(fe.Header.Size, 10),
+			model.PropertyEvidenceLevel:           string(model.EvidenceLevelObserved),
+		},
+	}
+	return processResult{
+		comp:     comp,
+		category: CategoryUnknown,
+		size:     fe.Header.Size,
+		ok:       true,
+	}
+}
+
+// sanitiseBOMRefPath produces a stable BOMRef suffix for the
+// over-MaxFileBytes observed-only entry. Path is the only identity
+// we have (no hash). Replaces filesystem separators and quotes with
+// dashes so the result is safe to embed in a CycloneDX BOMRef.
+func sanitiseBOMRefPath(p string) string {
+	if p == "" {
+		return "anon"
+	}
+	var sb strings.Builder
+	sb.Grow(len(p))
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= 'A' && c <= 'Z',
+			c >= '0' && c <= '9',
+			c == '-', c == '.':
+			sb.WriteByte(c)
+		default:
+			sb.WriteByte('-')
+		}
+	}
+	return sb.String()
 }

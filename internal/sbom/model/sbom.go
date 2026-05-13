@@ -24,7 +24,10 @@
 // still read everything we added.
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // SBOM is a single Software Bill of Materials.
 type SBOM struct {
@@ -76,4 +79,50 @@ type Tool struct {
 	Vendor  string
 	Name    string
 	Version string
+}
+
+// Source identifies the upstream tool that produced an SBOM.
+// Astinus enrichers occasionally branch on the source — Trivy's
+// CDX schema omits the `file`-type Components that Syft's
+// catalogers emit, so the untracked walk sees binaries Trivy
+// didn't enumerate and decisions like skip-set construction have
+// to compensate. S4 Task 5.
+type Source string
+
+// Recognised SBOM sources. Returned by `DetectSource`. Unknown
+// upstream tools (or SBOMs with no Tool entries) map to
+// SourceOther.
+const (
+	SourceUnknown Source = ""
+	SourceSyft    Source = "syft"
+	SourceTrivy   Source = "trivy"
+	SourceOther   Source = "other"
+)
+
+// DetectSource looks at sbom.Metadata.Tools to identify the
+// upstream SBOM-producing tool. Returns the first match (Syft and
+// Trivy are checked by case-insensitive substring, since both
+// tools ship under slightly different vendor / name combinations
+// across versions and CI distributions).
+func DetectSource(sbom *SBOM) Source {
+	if sbom == nil {
+		return SourceUnknown
+	}
+	for _, tool := range sbom.Metadata.Tools {
+		name := strings.ToLower(tool.Name)
+		vendor := strings.ToLower(tool.Vendor)
+		switch {
+		case strings.Contains(name, "syft"),
+			strings.Contains(vendor, "anchore"):
+			return SourceSyft
+		case strings.Contains(name, "trivy"),
+			strings.Contains(vendor, "aquasecurity"),
+			strings.Contains(vendor, "aqua security"):
+			return SourceTrivy
+		}
+	}
+	if len(sbom.Metadata.Tools) == 0 {
+		return SourceUnknown
+	}
+	return SourceOther
 }

@@ -11,6 +11,43 @@ public CLI / output surface.
 
 ## Unreleased
 
+### Fixed
+
+- **Oversize files no longer abort the untracked walk.** A single
+  file over `MaxFileBytes` used to kill the entire untracked
+  enricher with `untracked: file exceeds MaxFileBytes`, which on
+  Trivy CDX input — where the binary lacks a Syft-style skip-set
+  entry — broke `astinus enrich --sbom trivy.cdx.json` on any
+  image with a Go binary over the cap (e.g. Grafana's 435 MB
+  single-binary distribution). The walk now records the file as
+  an observed-only Component carrying
+  `astinus:untracked:skipped-reason = file-exceeds-max-bytes`
+  plus the active cap and the header-declared file size, then
+  continues. Operators see the gap in the SBOM rather than a
+  failed run. (ADR-0044, S4 Task 5.)
+
+### Changed
+
+- **`DefaultMaxFileBytes` raised from 256 MiB → 2 GiB.** The
+  pre-S4 ceiling was calibrated against synthetic Stage-4
+  fixtures and tripped on real-world Go / JVM / native-app
+  binaries. The 2 GiB default covers every binary observed on
+  public images while leaving margin before pathological
+  multi-GB blobs hit the cap. Operators on memory-constrained CI
+  runners can still lower the cap via the existing
+  `Options.MaxFileBytes` field. (ADR-0044, S4 Task 5.)
+
+### Added
+
+- **SBOM input-source detection.** `model.DetectSource(sbom)`
+  returns `SourceSyft`, `SourceTrivy`, `SourceOther`, or
+  `SourceUnknown` by case-insensitive substring matching
+  `sbom.Metadata.Tools[].Name` / `.Vendor`. The pipeline logs
+  the detected source once per run (`pipeline.input.source`) so
+  operators see which upstream tool produced the SBOM they fed
+  in. Informational today; future enrichers will be able to
+  branch on it. (ADR-0044, S4 Task 5.)
+
 ### BREAKING
 
 - **`--cpe-mode` default changed from `hybrid` to `auto`.** The

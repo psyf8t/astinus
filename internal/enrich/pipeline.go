@@ -138,6 +138,15 @@ func (p *Pipeline) Run(ctx context.Context, sbom *model.SBOM, bundle *image.Bund
 		return fmt.Errorf("pipeline: topo sort: %w", err)
 	}
 	p.logger.Info(telemetry.EventPipelineOrder, "order", enricherNames(ordered))
+	if src := model.DetectSource(sbom); src != model.SourceUnknown {
+		// S4 Task 5: surface the upstream SBOM tool once per run so
+		// operators see which input path triggered (some enrichers
+		// branch on it). Logged here rather than per-enricher so the
+		// information appears in the standard pipeline-start envelope.
+		p.logger.Info("pipeline.input.source",
+			"source", string(src),
+			"tools_count", len(sbom.Metadata.Tools))
+	}
 
 	pipelineCtx, pipelineSpan := p.tracer.Start(ctx, telemetry.EventPipelineStart,
 		telemetry.Attr("enrichers", len(ordered)))

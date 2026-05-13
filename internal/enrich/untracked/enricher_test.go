@@ -665,6 +665,86 @@ func TestEnrichIncludeFlagsBypassFilters(t *testing.T) {
 	}
 }
 
+// ─── S4 Task 5: oversize-file graceful skip ──────────────────────────
+
+// TestEnrichOversizeFileEmitsObservedAndContinues — S4 Task 5: when
+// a file exceeds MaxFileBytes the walk MUST NOT abort. The pre-S4
+// behaviour propagated the error up through WalkFiles → Enrich →
+// the whole untracked enricher returned a fatal error, which on
+// Trivy input (no skip-set coverage of the binary) made
+// `astinus enrich` exit non-zero on any image with a Go binary
+// larger than the cap. After this task the oversize file is
+// recorded as an observed-only Component carrying the skipped-
+// reason property, and the walk continues to the next file.
+func TestEnrichOversizeFileEmitsObservedAndContinues(t *testing.T) {
+	// 1 KiB ELF prefix + 1 KiB tail blob — fixture must exceed the
+	// MaxFileBytes cap we set on the Enricher. Keep the body small;
+	// we cap the enricher at 256 bytes so 2 KiB trips the limit.
+	big := append([]byte{0x7f, 'E', 'L', 'F', 0, 0, 0, 0},
+		bytes.Repeat([]byte{0x42}, 2048)...)
+	img := buildImage(t, map[string][]byte{
+		"usr/local/bin/giant": big,
+		// A second small file that MUST be processed normally after
+		// the oversize entry — pins that the walk continued.
+		"opt/bin/small": {0x7f, 'E', 'L', 'F', 0, 0, 0, 0, 1, 2, 3},
+	})
+
+	sbom := &model.SBOM{}
+	bundle := image.NewBundle(mustTag(t), img, sbom)
+	enr := NewWithOptions(Options{MaxFileBytes: 256})
+	if err := enr.Enrich(context.Background(), sbom, bundle); err != nil {
+		t.Fatalf("Enrich must succeed on oversize file (S4 Task 5): %v", err)
+	}
+
+	var (
+		oversize *model.Component
+		smaller  *model.Component
+	)
+	for i := range sbom.Components {
+		c := &sbom.Components[i]
+		switch c.Name {
+		case "usr/local/bin/giant":
+			oversize = c
+		case "opt/bin/small":
+			smaller = c
+		}
+	}
+	if oversize == nil {
+		t.Fatalf("oversize file missing from output; got %v", componentNamesSlice(sbom))
+	}
+	if smaller == nil {
+		t.Fatalf("subsequent small file missing — walk likely aborted; got %v",
+			componentNamesSlice(sbom))
+	}
+	if oversize.Properties["astinus:untracked:skipped-reason"] != "file-exceeds-max-bytes" {
+		t.Errorf("skipped-reason = %q, want file-exceeds-max-bytes",
+			oversize.Properties["astinus:untracked:skipped-reason"])
+	}
+	if oversize.Properties[model.PropertyEvidenceLevel] != string(model.EvidenceLevelObserved) {
+		t.Errorf("oversize evidence-level = %q, want observed",
+			oversize.Properties[model.PropertyEvidenceLevel])
+	}
+	if oversize.Type != model.ComponentTypeFile {
+		t.Errorf("oversize Type = %v, want file", oversize.Type)
+	}
+	if oversize.PURL != "" || len(oversize.CPEs) != 0 {
+		t.Errorf("oversize Component must have empty PURL/CPE: PURL=%q CPEs=%v",
+			oversize.PURL, oversize.CPEs)
+	}
+}
+
+// componentNamesSlice returns the names of every top-level
+// Component for diagnostic output. Distinct from the test-helper
+// `componentNames` used elsewhere in this file to avoid clashing
+// with the existing extractor-package helper of the same name.
+func componentNamesSlice(sbom *model.SBOM) []string {
+	out := make([]string, 0, len(sbom.Components))
+	for _, c := range sbom.Components {
+		out = append(out, c.Name)
+	}
+	return out
+}
+
 // ─── S4 Task 0: phantom-component regression coverage ────────────────
 
 // TestEnrichDoesNotEmitPurlShapeGuess — the canonical reproducer for

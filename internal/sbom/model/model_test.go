@@ -128,3 +128,41 @@ func TestPropertyNamespaceConsistency(t *testing.T) {
 		}
 	}
 }
+
+// TestDetectSource — S4 Task 5: tools-string matching for the
+// upstream SBOM source. Matches case-insensitively on Tool.Name and
+// Tool.Vendor so the helper recognises both
+// `Tool{Name:"syft"}` and `Tool{Vendor:"anchore", Name:"syft"}`.
+func TestDetectSource(t *testing.T) {
+	cases := []struct {
+		name  string
+		tools []Tool
+		want  Source
+	}{
+		{name: "nil sbom is unknown", tools: nil, want: SourceUnknown},
+		{name: "no tools is unknown", tools: []Tool{}, want: SourceUnknown},
+		{name: "syft bare", tools: []Tool{{Name: "syft"}}, want: SourceSyft},
+		{name: "syft cased", tools: []Tool{{Name: "Syft"}}, want: SourceSyft},
+		{name: "syft via vendor anchore",
+			tools: []Tool{{Vendor: "anchore", Name: "cataloger"}}, want: SourceSyft},
+		{name: "trivy bare", tools: []Tool{{Name: "trivy"}}, want: SourceTrivy},
+		{name: "trivy via aquasecurity",
+			tools: []Tool{{Vendor: "aquasecurity", Name: "scanner"}}, want: SourceTrivy},
+		{name: "trivy via 'Aqua Security'",
+			tools: []Tool{{Vendor: "Aqua Security", Name: "scanner"}}, want: SourceTrivy},
+		{name: "other tool", tools: []Tool{{Name: "cdxgen"}}, want: SourceOther},
+		{name: "first match wins",
+			tools: []Tool{{Name: "cdxgen"}, {Name: "syft"}}, want: SourceSyft},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var sbom *SBOM
+			if tc.tools != nil {
+				sbom = &SBOM{Metadata: Metadata{Tools: tc.tools}}
+			}
+			if got := DetectSource(sbom); got != tc.want {
+				t.Errorf("DetectSource = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
