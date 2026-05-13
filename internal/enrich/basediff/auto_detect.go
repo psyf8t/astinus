@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
@@ -127,8 +128,7 @@ func (d *AutoDetector) Detect(ctx context.Context, img v1.Image) (*AutoDetection
 		return &AutoDetectionResult{
 			OSReleaseID:        rel.ID,
 			OSReleaseVersionID: rel.VersionID,
-			FallbackReason: fmt.Sprintf("no known base for %s %s",
-				rel.ID, rel.VersionID),
+			FallbackReason:     d.buildNoKnownBaseReason(rel),
 		}, nil
 	}
 
@@ -223,4 +223,39 @@ func (d *AutoDetector) scoreOne(ctx context.Context, img v1.Image, cand KnownBas
 func fileExistsInImage(ctx context.Context, img v1.Image, path string) bool {
 	_, _, err := readFileFromImage(ctx, img, path)
 	return err == nil
+}
+
+// buildNoKnownBaseReason composes the actionable FallbackReason
+// shown when the os-release-parsed distro doesn't match any
+// catalogue entry. The reason lists every distro the catalogue
+// carries, every version it has for the detected distro (when
+// known), and tells operators how to either refresh the snapshot
+// or sidestep auto-detection with `--base <ref>`. ADR-0060.
+//
+// The bias is "operator-actionable rather than terse": run #4
+// measured 0 % origin coverage on D-postgres (debian:trixie-slim
+// is debian 13, not in the pre-S6 catalogue) and the bare "no
+// known base for debian 13" message gave no path forward.
+func (d *AutoDetector) buildNoKnownBaseReason(rel *OSRelease) string {
+	if d.known == nil {
+		return fmt.Sprintf("no known base for %s %s (catalogue unavailable)", rel.ID, rel.VersionID)
+	}
+	availableDistros := d.known.UniqueDistroIDs()
+	availableVersions := d.known.VersionsForDistro(rel.ID)
+	if len(availableVersions) > 0 {
+		return fmt.Sprintf(
+			"no known base for %s %s. Known versions for %s: %s. "+
+				"Refresh the bundled snapshot via the known-bases refresh job "+
+				"or supply --base <ref> explicitly.",
+			rel.ID, rel.VersionID,
+			rel.ID, strings.Join(availableVersions, ", "),
+		)
+	}
+	return fmt.Sprintf(
+		"no known base for %s %s. Known distros: %s. "+
+			"Refresh the bundled snapshot via the known-bases refresh job "+
+			"or supply --base <ref> explicitly.",
+		rel.ID, rel.VersionID,
+		strings.Join(availableDistros, ", "),
+	)
 }

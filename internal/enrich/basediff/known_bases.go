@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 )
@@ -103,6 +104,60 @@ func (k *KnownBases) Entries() []KnownBaseEntry {
 	}
 	out := make([]KnownBaseEntry, len(k.entries))
 	copy(out, k.entries)
+	return out
+}
+
+// UniqueDistroIDs returns the sorted, deduplicated list of distro
+// IDs the catalogue carries. Used by the auto-detector when
+// building an actionable FallbackReason on a no-known-base outcome —
+// operators see the available alternatives. Deterministic order so
+// the same diagnostic text reproduces across runs. S6 Task 3 /
+// ADR-0060.
+func (k *KnownBases) UniqueDistroIDs() []string {
+	if k == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(k.entries))
+	for _, e := range k.entries {
+		id := strings.ToLower(e.ID)
+		if id == "" {
+			continue
+		}
+		seen[id] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// VersionsForDistro returns the sorted, deduplicated list of
+// known VersionIDs for the given distro ID (case-insensitive).
+// Returns an empty slice for an unknown distro. Used by the
+// FallbackReason builder to tell operators "we know debian, but
+// only versions 11, 12 — not 13". S6 Task 3 / ADR-0060.
+func (k *KnownBases) VersionsForDistro(id string) []string {
+	if k == nil || id == "" {
+		return nil
+	}
+	wantID := strings.ToLower(id)
+	seen := make(map[string]struct{})
+	for _, e := range k.entries {
+		if strings.ToLower(e.ID) != wantID {
+			continue
+		}
+		if e.VersionID == "" {
+			continue
+		}
+		seen[e.VersionID] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for v := range seen {
+		out = append(out, v)
+	}
+	sort.Strings(out)
 	return out
 }
 

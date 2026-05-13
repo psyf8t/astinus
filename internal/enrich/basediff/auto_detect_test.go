@@ -159,8 +159,16 @@ func TestKnownBases_LookupByOSRelease(t *testing.T) {
 		{"alpine", "3.20", 1},
 		{"alpine", "3.20.6", 1}, // prefix-matches
 		{"alpine", "99.0", 0},
-		{"debian", "12", 2}, // both debian:12-slim and gcr.io/distroless/base-debian12
-		{"debian", "12.5", 2},
+		// debian:12 entries: debian:12-slim,
+		// gcr.io/distroless/base-debian12,
+		// python:3.12-slim-bookworm, python:3.13-slim-bookworm.
+		// S6 Task 3 added the two python:slim entries.
+		{"debian", "12", 4},
+		{"debian", "12.5", 4},
+		// S6 Task 3 added debian 13 (trixie): debian:13-slim,
+		// debian:trixie-slim, python:3.13-slim-trixie.
+		{"debian", "13", 3},
+		{"debian", "13.8", 3}, // prefix-matches
 		{"ubuntu", "22.04", 1},
 		{"unknown", "1", 0},
 	}

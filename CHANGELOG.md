@@ -13,6 +13,21 @@ public CLI / output surface.
 
 ### Fixed
 
+- **`--base auto` now resolves base for `debian:trixie-slim` /
+  `debian:13-slim` (Debian 13) images.** Run #4 measured
+  D-postgres origin coverage at **0 %** (4134/4134 components
+  marked `unknown`) because `postgres:17` is built on
+  `debian:trixie-slim` (Debian 13) and the bundled known_bases.json
+  captured `2026-05-13` had no debian:13 entry — trixie went GA in
+  late 2025, after the original Sprint 4 Task 6 catalogue was
+  assembled. Refreshed the snapshot
+  (`captured_at = 2026-05-14`, `next_update_due = 2026-08-14`) with
+  seven new entries: `debian:13-slim`, `debian:trixie-slim`,
+  `python:3.12-slim-bookworm`, `python:3.13-slim-bookworm`,
+  `python:3.13-slim-trixie`, and `alpine:3.23.4`. The Python:slim
+  entries are forward-prep for Sprint 6 Task 4 (layered intermediate
+  bases on B-airflow). See ADR-0060.
+
 - **`astinus:origin` on Alpine images now classifies apk packages by
   earliest-introducing layer, not by presence in
   `/lib/apk/db/installed`.** Run #4 measured C-nginx origin accuracy
@@ -101,6 +116,17 @@ public CLI / output surface.
   See ADR-0057.
 
 ### Added
+
+- **Actionable `--base auto` FallbackReason on unknown bases.**
+  Pre-S6 the no-match diagnostic was a bare
+  `"no known base for X Y"` blurb. Post-S6 the SBOM-stamped
+  `astinus:basediff:detection-fallback-reason` lists the catalogued
+  distros (and known versions for the detected distro, when the
+  distro itself IS catalogued) plus the remediation hint
+  (`Refresh the bundled snapshot … or supply --base <ref>
+  explicitly`). Two new `KnownBases` helpers — `UniqueDistroIDs()`
+  and `VersionsForDistro(id)` — drive the diagnostic and remain
+  available for future CLI surfaces. ADR-0060.
 
 - **Sprint 5 Phase A acceptance suite (`test/acceptance/sprint5/`).**
   Ten in-process tests across two sub-suites (`quality/`, `ux/`)

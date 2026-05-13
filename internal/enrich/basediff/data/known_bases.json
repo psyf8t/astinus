@@ -1,7 +1,7 @@
 {
   "schema_version": "1",
-  "captured_at": "2026-05-13T00:00:00Z",
-  "next_update_due": "2026-08-13T00:00:00Z",
+  "captured_at": "2026-05-14T00:00:00Z",
+  "next_update_due": "2026-08-14T00:00:00Z",
   "entries": [
     {
       "id": "alpine",
@@ -164,6 +164,73 @@
         "etc/os-release",
         "etc/passwd",
         "etc/group"
+      ]
+    },
+    {
+      "id": "debian",
+      "version_id": "13",
+      "image_ref": "debian:13-slim",
+      "sample_file_paths": [
+        "etc/debian_version",
+        "etc/apt/sources.list.d/debian.sources",
+        "var/lib/dpkg/status",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "debian",
+      "version_id": "13",
+      "image_ref": "debian:trixie-slim",
+      "sample_file_paths": [
+        "etc/debian_version",
+        "etc/apt/sources.list.d/debian.sources",
+        "var/lib/dpkg/status",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "debian",
+      "version_id": "12",
+      "image_ref": "python:3.12-slim-bookworm",
+      "sample_file_paths": [
+        "etc/debian_version",
+        "var/lib/dpkg/status",
+        "usr/local/bin/python3",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "debian",
+      "version_id": "12",
+      "image_ref": "python:3.13-slim-bookworm",
+      "sample_file_paths": [
+        "etc/debian_version",
+        "var/lib/dpkg/status",
+        "usr/local/bin/python3",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "debian",
+      "version_id": "13",
+      "image_ref": "python:3.13-slim-trixie",
+      "sample_file_paths": [
+        "etc/debian_version",
+        "etc/apt/sources.list.d/debian.sources",
+        "var/lib/dpkg/status",
+        "usr/local/bin/python3",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "alpine",
+      "version_id": "3.23.4",
+      "image_ref": "alpine:3.23.4",
+      "sample_file_paths": [
+        "etc/alpine-release",
+        "etc/apk/repositories",
+        "lib/apk/db/installed",
+        "etc/os-release"
       ]
     }
   ]
