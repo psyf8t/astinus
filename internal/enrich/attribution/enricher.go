@@ -82,6 +82,14 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 	stamper := &stamper{fm: fileMap}
 	stamper.applyAll(sbom.Components)
 
+	// S6 Task 2: apk components reach this point stamped with the
+	// LAST layer that rewrote `/lib/apk/db/installed` (the same
+	// layer for every apk row on the image). Override to the
+	// EARLIEST layer in which the (name, version) tuple appeared in
+	// the DB — that's what `astinus:origin` needs to distinguish
+	// base-shipped packages from operator-added ones. ADR-0059.
+	applyApkEarliest(sbom.Components, fileMap)
+
 	e.stampRuntimeAndConfidence(sbom, bundle)
 	return nil
 }

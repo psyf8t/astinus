@@ -13,6 +13,33 @@ public CLI / output surface.
 
 ### Fixed
 
+- **`astinus:origin` on Alpine images now classifies apk packages by
+  earliest-introducing layer, not by presence in
+  `/lib/apk/db/installed`.** Run #4 measured C-nginx origin accuracy
+  at **15 %** (3/20) — every apk package the nginx Dockerfile added
+  on top of the alpine base was misclassified as `base-image`. Root
+  cause was twofold: (1) no apk-earliest-layer infrastructure — the
+  FileMap's last-touch lookup against any apk-managed path collapsed
+  every apk row to the LAST layer that ran `apk add` / `apk del`,
+  and (2) basediff's content strategy ran `pathInBase` on
+  `/lib/apk/db/installed` which lives in both the alpine base AND
+  every apk-touching layer, so every apk row hit
+  `OriginBaseImage`. Sprint 4 Task 2 (ADR-0041) listed an
+  apk-earliest path as an open question; the DoD checkbox was
+  ticked but the production code was never written. S6 Task 2 fills
+  both gaps. The layer walker now parses `/lib/apk/db/installed`
+  during the existing tar stream and builds a `(name@version) →
+  earliest layer index` map; new
+  `FileMap.ApkEarliestLayer(name, version)` returns the layer
+  descriptor. Attribution enricher gains `applyApkEarliest` that
+  runs after the default stamper, looks up apk components
+  (`pkg:apk/...` PURL) in the index, and OVERRIDES `LayerInfo` +
+  stamps `astinus:layer:source = "apk-earliest-layer"`. basediff's
+  `pathsForComponent` filters `/lib/apk/db/installed` out for apk
+  components so the content strategy doesn't double-count the DB
+  path. Non-Alpine images and non-apk components are unaffected.
+  See ADR-0059.
+
 - **CPE 2.3 attribute values now backslash-escape special characters
   per NIST IR 7695 §6.1.2.5.** Previous build emitted literal `:` and
   `+` inside the version slot, which made round-trip `Parse(Build(...))`

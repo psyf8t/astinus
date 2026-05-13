@@ -37,6 +37,13 @@ type FileMap struct {
 	// layers is the in-order list of layer descriptors so the
 	// returned LayerIndex always pairs with a stable identity.
 	layers []Info
+
+	// apkEarliest maps `name@version` (from `/lib/apk/db/installed`
+	// records) to the 0-based index of the EARLIEST layer in which
+	// the record appeared. Populated at walk time by parsing the
+	// apk DB body in every layer that writes it. Empty on images
+	// without `/lib/apk/db/installed`. S6 Task 2 / ADR-0059.
+	apkEarliest map[string]int
 }
 
 // Info describes one layer in the order it was applied.
@@ -110,6 +117,29 @@ func (m *FileMap) Layers() []Info {
 	return out
 }
 
+// ApkEarliestLayer returns the Info of the layer that FIRST recorded
+// (name, version) in `/lib/apk/db/installed`. The apk DB is
+// rewritten on every `apk add` / `apk del`, so the FileMap's
+// last-touch lookup against the DB path collapses every apk
+// component to the last apk-touching layer. The earliest-layer
+// index is what `astinus:origin` needs to distinguish base-image
+// packages from application-layer additions. Returns (Info{}, false)
+// when the FileMap was not built from an Alpine-style image or
+// the (name, version) tuple isn't in the index. ADR-0059.
+func (m *FileMap) ApkEarliestLayer(name, version string) (Info, bool) {
+	if m == nil || m.apkEarliest == nil {
+		return Info{}, false
+	}
+	idx, ok := m.apkEarliest[apkRecordKey(name, version)]
+	if !ok {
+		return Info{}, false
+	}
+	if idx < 0 || idx >= len(m.layers) {
+		return Info{}, false
+	}
+	return m.layers[idx], true
+}
+
 // Len reports how many distinct paths the FileMap tracks.
 func (m *FileMap) Len() int {
 	if m == nil {
@@ -139,8 +169,9 @@ func Walk(ctx context.Context, img v1.Image) (*FileMap, error) {
 	}
 
 	m := &FileMap{
-		paths:  make(map[string]int),
-		layers: descs,
+		paths:       make(map[string]int),
+		layers:      descs,
+		apkEarliest: make(map[string]int),
 	}
 
 	for i, lyr := range layers {
@@ -268,7 +299,37 @@ func walkLayer(layerIdx int, lyr v1.Layer, m *FileMap) error {
 				continue
 			}
 			m.paths[name] = layerIdx
+			// When the layer writes `/lib/apk/db/installed`, parse
+			// its body and record EARLIEST layer per (name@version).
+			// Earlier appearances win — apk-add/apk-del rewrite the
+			// DB on every operation, but a package that landed in an
+			// earlier layer still appeared in that earlier layer's
+			// DB version. S6 Task 2 / ADR-0059.
+			if name == apkInstalledPath {
+				recordApkEarliest(tr, m, layerIdx)
+			}
 		}
+	}
+}
+
+// recordApkEarliest streams the in-progress tar entry's body
+// through parseApkInstalled and stamps each (name@version) into
+// m.apkEarliest at layerIdx — but only when not already present
+// at an earlier index. The caller already advanced the tar reader
+// past the header; on return the reader sits at the next entry.
+// Extracted from walkLayer to keep that function under the gocyclo
+// budget. S6 Task 2.
+func recordApkEarliest(tr io.Reader, m *FileMap, layerIdx int) {
+	records := parseApkInstalled(tr)
+	for _, rec := range records {
+		key := apkRecordKey(rec.Name, rec.Version)
+		if key == "" {
+			continue
+		}
+		if _, seen := m.apkEarliest[key]; seen {
+			continue
+		}
+		m.apkEarliest[key] = layerIdx
 	}
 }
 

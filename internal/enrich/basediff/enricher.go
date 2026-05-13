@@ -528,6 +528,16 @@ func originFor(c *model.Component, diff *layer.Diff) model.Origin {
 // reading both the canonical Evidence.Locations and Syft's
 // `syft:location:N:path` properties (Syft does not populate
 // evidence.occurrences). Mirror of the helper in untracked/filter.go.
+//
+// S6 Task 2: for apk-managed components (`pkg:apk/...` PURL), the
+// shared `/lib/apk/db/installed` path is filtered out — that path
+// lives in BOTH the base alpine image AND every layer that runs
+// `apk add` / `apk del`, so feeding it into the content-strategy's
+// path/hash classifier collapses every apk row to OriginBaseImage
+// (the file is in base; the bytes differ because the DB is rewritten
+// on each operation, but the path-in-base check still fires). The
+// apk DB path doesn't describe the artifact in any case — it's
+// metadata about the package manager. ADR-0059.
 func pathsForComponent(c *model.Component) []string {
 	var out []string
 	if c.Evidence != nil {
@@ -544,6 +554,25 @@ func pathsForComponent(c *model.Component) []string {
 		if strings.HasPrefix(k, "syft:location:") && strings.HasSuffix(k, ":path") {
 			out = append(out, v)
 		}
+	}
+	return filterApkMetadataPaths(c, out)
+}
+
+// filterApkMetadataPaths drops the apk-DB path from `paths` when c
+// is an apk-managed component. Returns paths unchanged for non-apk
+// rows so the helper composes with other path-shapes without
+// branching at the call site. S6 Task 2.
+func filterApkMetadataPaths(c *model.Component, paths []string) []string {
+	if c == nil || !strings.HasPrefix(c.PURL, "pkg:apk/") {
+		return paths
+	}
+	out := paths[:0]
+	for _, p := range paths {
+		normalized := layer.NormalizePath(p)
+		if normalized == layer.ApkInstalledPath {
+			continue
+		}
+		out = append(out, p)
 	}
 	return out
 }
