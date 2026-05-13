@@ -145,6 +145,29 @@ public CLI / output surface.
 
 ### Added
 
+- **Operator-supplied YAML policy framework.** New `--policy
+  <file>` CLI flag (repeatable; policies stack in invocation
+  order). YAML rules carry component matchers (`purl_matches`
+  glob, `ecosystem`, `version_below`, `has_property`) and
+  finding matchers (`id_prefix`, `severity`) with arbitrary
+  `all`/`any`/`not` composition. Three action types:
+  - `deny` adds a synthetic `POLICY-<rule-id>` finding to the
+    compliance gate (severity High) — useful for blocking
+    components regardless of CVE catalog status (e.g.
+    "log4j-core < 2.17.0 is forbidden").
+  - `allow` suppresses matching CVE-shaped findings —
+    operator-vouched-safe (e.g. "Critical CVEs on
+    `astinus:origin = base` are vendor responsibility").
+  - `warn` stamps SBOM metadata only (no gate effect).
+  Strict YAML decoder (unknown keys → error). SBOM stamps
+  `astinus:policy:hit:<rule-id> = <action>:<message>` per
+  decision + aggregate `astinus:policy:total-hits`. Composes
+  with `--vex` (S6-T6 ADR-0063): gate evaluates VEX first,
+  then policy, then `--fail-on` threshold. `remap_severity`
+  action and Rego support deferred to Sprint 7+. See ADR-0064.
+
+### Added
+
 - **VEX (Vulnerability Exploitability eXchange) support.** New
   `--vex <file>` CLI flag (repeatable) accepts OpenVEX 0.2 and
   CycloneDX 1.5 VEX documents (format detected by content). The

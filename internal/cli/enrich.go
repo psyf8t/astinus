@@ -229,6 +229,13 @@ type enrichOptions struct {
 	// suppress matching CVE-shaped compliance findings. S6 Task
 	// 6 / ADR-0063.
 	vexFiles []string
+	// policyFiles is the list of operator-supplied policy YAML
+	// documents (S6 Task 7 / ADR-0064). The compliance gate runs
+	// AFTER VEX suppression: deny rules add synthetic
+	// `POLICY-<rule-id>` findings to the gate; allow rules
+	// suppress matching CVE findings; warn rules stamp metadata
+	// only. Multiple files stack in invocation order.
+	policyFiles []string
 	// metricsOutput controls how the in-process Prometheus
 	// registry is exposed at the end of the run. Forms:
 	//
@@ -417,6 +424,13 @@ add the others.`,
 			"`fixed` suppress matching CVE-shaped compliance findings. "+
 			"OpenVEX and CycloneDX VEX formats are accepted (detected by "+
 			"content). See ADR-0063.")
+	flags.StringSliceVar(&opts.policyFiles, "policy", nil,
+		"Path to an operator-supplied policy YAML file. May be repeated; "+
+			"policies stack in invocation order. Rules support "+
+			"component matchers (purl_matches glob, ecosystem, "+
+			"version_below, has_property) + finding matchers "+
+			"(id_prefix, severity), composition (all/any/not), and "+
+			"action types deny / allow / warn. See ADR-0064.")
 	flags.StringVar(&opts.metricsOutput, "metrics-output", "",
 		"Where to emit Prometheus text-format metrics at end of run: stdout | stderr | file:/path (default: disabled)")
 	flags.StringVar(&opts.tracingEndpoint, "tracing-endpoint", "",
@@ -646,7 +660,7 @@ func runSigningStep(ctx context.Context, opts *enrichOptions, logger *slog.Logge
 // `astinus:vex:suppressed:<CVE-ID>` on SBOM metadata so downstream
 // consumers see what was filtered + why. ADR-0063.
 func evaluateComplianceGate(ctx context.Context, opts *enrichOptions, sbom *model.SBOM, logger *slog.Logger) error {
-	if opts.failOn == "" && len(opts.vexFiles) == 0 {
+	if opts.failOn == "" && len(opts.vexFiles) == 0 && len(opts.policyFiles) == 0 {
 		return nil
 	}
 	vexStore, err := vex.LoadStore(opts.vexFiles)
@@ -654,11 +668,19 @@ func evaluateComplianceGate(ctx context.Context, opts *enrichOptions, sbom *mode
 		return newExitError(ExitInvalidArgs,
 			fmt.Errorf("--vex: %w", err))
 	}
+	policies, err := policy.LoadAll(opts.policyFiles)
+	if err != nil {
+		return newExitError(ExitInvalidArgs,
+			fmt.Errorf("--policy: %w", err))
+	}
+	enricher := compliance.New()
+	findings := enricher.Findings(ctx, sbom)
+	suppressedIDs := applyVEXSuppression(sbom, findings, vexStore, logger)
+	policyAllowed, policyDenied := applyPolicies(sbom, &findings, policies, logger)
+
 	if opts.failOn == "" {
-		// VEX was supplied but no gate threshold — still apply
-		// suppression stamps so SBOM consumers see the surface.
-		findings := compliance.New().Findings(ctx, sbom)
-		applyVEXSuppression(sbom, findings, vexStore, logger)
+		// Decorate-only run: VEX + policy stamps land, no gate
+		// threshold to enforce.
 		return nil
 	}
 
@@ -666,9 +688,6 @@ func evaluateComplianceGate(ctx context.Context, opts *enrichOptions, sbom *mode
 	if !ok {
 		return newExitError(ExitInvalidArgs, fmt.Errorf("--fail-on: unknown severity %q", opts.failOn))
 	}
-	enricher := compliance.New()
-	findings := enricher.Findings(ctx, sbom)
-	suppressedIDs := applyVEXSuppression(sbom, findings, vexStore, logger)
 
 	hits := 0
 	for _, f := range findings {
@@ -678,23 +697,201 @@ func evaluateComplianceGate(ctx context.Context, opts *enrichOptions, sbom *mode
 		if _, ok := suppressedIDs[f.RuleID]; ok {
 			continue
 		}
+		if _, ok := policyAllowed[f.RuleID]; ok {
+			continue
+		}
 		hits++
 	}
 	if hits == 0 {
 		logger.Info("compliance.gate.passed",
 			"floor", floor.String(),
 			"findings_total", len(findings),
-			"vex_suppressed", len(suppressedIDs))
+			"vex_suppressed", len(suppressedIDs),
+			"policy_allowed", len(policyAllowed),
+			"policy_denied", len(policyDenied))
 		return nil
 	}
 	logger.Warn("compliance.gate.failed",
 		"floor", floor.String(),
 		"findings_at_or_above_floor", hits,
 		"findings_total", len(findings),
-		"vex_suppressed", len(suppressedIDs))
+		"vex_suppressed", len(suppressedIDs),
+		"policy_allowed", len(policyAllowed),
+		"policy_denied", len(policyDenied))
 	return newExitError(ExitComplianceFail,
 		fmt.Errorf("compliance: %d finding(s) at or above %q severity (run with --fail-on=\"\" to disable the gate)",
 			hits, floor.String()))
+}
+
+// applyPolicies walks every loaded policy and applies its rules to
+// the SBOM under evaluation. Two kinds of evaluation:
+//
+//   - Per-component: for each component, run policy.Evaluate with
+//     a nil Finding. ActionDeny decisions append a synthetic
+//     POLICY-<rule-id> finding to *findings (severity high — the
+//     gate then counts it like any other high-severity finding).
+//     ActionWarn / ActionAllow stamp metadata but don't change
+//     the findings slice.
+//   - Per-finding: for each existing finding, find the matching
+//     component, run policy.Evaluate. ActionAllow returns the
+//     finding's RuleID in policyAllowed (gate subtracts).
+//     ActionDeny / ActionWarn stamp metadata.
+//
+// Returns two maps the caller can subtract / count off the gate
+// hit total: policyAllowed (suppress) and policyDenied (kept for
+// diagnostic). Empty policy slice → no-op; both maps empty.
+// S6 Task 7 / ADR-0064.
+func applyPolicies(sbom *model.SBOM, findings *[]policy.Finding, policies []*policy.Policy, logger *slog.Logger) (policyAllowed, policyDenied map[string]struct{}) {
+	policyAllowed = map[string]struct{}{}
+	policyDenied = map[string]struct{}{}
+	if sbom == nil || len(policies) == 0 || findings == nil {
+		return
+	}
+	totalHits := 0
+	totalHits += evaluatePoliciesPerComponent(sbom, findings, policies, policyDenied, logger)
+	totalHits += evaluatePoliciesPerFinding(sbom, findings, policies, policyAllowed, policyDenied, logger)
+	if totalHits > 0 {
+		if sbom.Metadata.Properties == nil {
+			sbom.Metadata.Properties = map[string]string{}
+		}
+		sbom.Metadata.Properties["astinus:policy:total-hits"] = fmt.Sprintf("%d", totalHits)
+	}
+	return policyAllowed, policyDenied
+}
+
+// evaluatePoliciesPerComponent runs the per-component evaluation
+// pass — every component × every policy. Deny decisions emit a
+// synthetic POLICY-<rule-id> finding the gate counts.
+func evaluatePoliciesPerComponent(sbom *model.SBOM, findings *[]policy.Finding, policies []*policy.Policy, policyDenied map[string]struct{}, logger *slog.Logger) int {
+	hits := 0
+	for i := range sbom.Components {
+		comp := projectComponentForPolicy(&sbom.Components[i])
+		for _, pol := range policies {
+			for _, d := range pol.Evaluate(policy.EvalContext{Component: comp}) {
+				d.Source = pol.SourcePath
+				stampPolicyDecision(sbom, d)
+				hits++
+				if d.Action == policy.ActionDeny {
+					synthetic := policy.Finding{
+						Severity:  policy.SeverityHigh,
+						RuleID:    "POLICY-" + d.Rule,
+						Component: comp.BOMRef,
+						Message:   d.Message,
+					}
+					*findings = append(*findings, synthetic)
+					policyDenied[synthetic.RuleID] = struct{}{}
+				}
+				logger.Warn("compliance.policy.decision",
+					"rule", d.Rule,
+					"action", string(d.Action),
+					"component", comp.BOMRef,
+					"source", d.Source)
+			}
+		}
+	}
+	return hits
+}
+
+// evaluatePoliciesPerFinding runs the per-finding evaluation pass.
+// Allow → mark for suppression; deny → mark for the denied set
+// (gate keeps the finding); warn → stamp only.
+func evaluatePoliciesPerFinding(sbom *model.SBOM, findings *[]policy.Finding, policies []*policy.Policy, policyAllowed, policyDenied map[string]struct{}, logger *slog.Logger) int {
+	componentByRef := indexComponentsByBOMRef(sbom.Components)
+	hits := 0
+	for _, f := range *findings {
+		var comp *policy.Component
+		if c, ok := componentByRef[f.Component]; ok {
+			comp = projectComponentForPolicy(c)
+		}
+		finding := f
+		for _, pol := range policies {
+			for _, d := range pol.Evaluate(policy.EvalContext{
+				Component: comp,
+				Finding:   &finding,
+			}) {
+				d.Source = pol.SourcePath
+				stampPolicyDecision(sbom, d)
+				hits++
+				recordDecisionAction(d.Action, f.RuleID, policyAllowed, policyDenied)
+				logger.Warn("compliance.policy.decision",
+					"rule", d.Rule,
+					"action", string(d.Action),
+					"finding", f.RuleID,
+					"source", d.Source)
+			}
+		}
+	}
+	return hits
+}
+
+// recordDecisionAction routes the action's effect to the
+// appropriate id set. Warn has no gate effect (metadata-only).
+func recordDecisionAction(action policy.ActionType, ruleID string, allowed, denied map[string]struct{}) {
+	switch action {
+	case policy.ActionAllow:
+		allowed[ruleID] = struct{}{}
+	case policy.ActionDeny:
+		denied[ruleID] = struct{}{}
+	case policy.ActionWarn:
+		// metadata stamped at the call site; no gate effect
+	}
+}
+
+// stampPolicyDecision writes `astinus:policy:hit:<rule-id> =
+// <action>:<message>` on SBOM metadata. Idempotent — multiple
+// matches against the same rule overwrite with the latest
+// decision (operator-facing the rule's most recent firing reads
+// the same regardless of how many components / findings it
+// matched).
+func stampPolicyDecision(sbom *model.SBOM, d policy.Decision) {
+	if sbom == nil {
+		return
+	}
+	if sbom.Metadata.Properties == nil {
+		sbom.Metadata.Properties = map[string]string{}
+	}
+	value := string(d.Action)
+	if d.Message != "" {
+		value = value + ":" + d.Message
+	}
+	sbom.Metadata.Properties["astinus:policy:hit:"+d.Rule] = value
+}
+
+// projectComponentForPolicy converts a model.Component into the
+// policy package's leaner shape. Done at evaluation time (cheap
+// per-component) to keep the policy package free of the bigger
+// model graph.
+func projectComponentForPolicy(c *model.Component) *policy.Component {
+	if c == nil {
+		return nil
+	}
+	return &policy.Component{
+		BOMRef:     c.BOMRef,
+		Name:       c.Name,
+		Version:    c.Version,
+		PURL:       c.PURL,
+		Properties: c.Properties,
+	}
+}
+
+// indexComponentsByBOMRef builds a BOMRef → *Component lookup so
+// applyPolicies can resolve a Finding.Component back to its
+// component without re-walking the SBOM each iteration.
+func indexComponentsByBOMRef(comps []model.Component) map[string]*model.Component {
+	out := map[string]*model.Component{}
+	var walk func([]model.Component)
+	walk = func(cs []model.Component) {
+		for i := range cs {
+			if cs[i].BOMRef != "" {
+				out[cs[i].BOMRef] = &cs[i]
+			}
+			if len(cs[i].SubComponents) > 0 {
+				walk(cs[i].SubComponents)
+			}
+		}
+	}
+	walk(comps)
+	return out
 }
 
 // applyVEXSuppression walks findings, identifies CVE-shaped RuleIDs
