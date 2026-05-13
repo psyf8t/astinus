@@ -29,18 +29,41 @@ type Options struct {
 	// image. Use this to plumb the same transport / credentials /
 	// platform the CLI configured for the target.
 	SourceOpts []source.Option
+
+	// DisableContentBaseDetection turns off the S4 Task 6
+	// content-based detection fallback (os-release + bundled
+	// known-bases catalogue) when label-based detection returns
+	// empty under ModeAuto. Default false → detection runs.
+	DisableContentBaseDetection bool
+
+	// BaseMinConfidence is the threshold AutoDetector applies when
+	// picking the highest-scoring catalogue entry. Zero value
+	// triggers the helper's own default (0.70). S4 Task 6.
+	BaseMinConfidence float64
 }
 
 // Enricher implements enrich.Enricher.
 type Enricher struct {
-	opts Options
+	opts     Options
+	detector *AutoDetector
 }
 
 // New returns an Enricher with default options (Mode=Auto).
 func New() *Enricher { return NewWithOptions(Options{}) }
 
-// NewWithOptions returns an Enricher with the supplied options.
-func NewWithOptions(o Options) *Enricher { return &Enricher{opts: o} }
+// NewWithOptions returns an Enricher with the supplied options. The
+// content-based detector is wired in unless the bundled known-bases
+// snapshot fails to load (treated as a soft fallback — label-based
+// detection still works without it). S4 Task 6.
+func NewWithOptions(o Options) *Enricher {
+	e := &Enricher{opts: o}
+	if !o.DisableContentBaseDetection {
+		if known, err := LoadBundledKnownBases(); err == nil {
+			e.detector = NewAutoDetector(known, o.BaseMinConfidence)
+		}
+	}
+	return e
+}
 
 // Name implements enrich.Enricher.
 func (*Enricher) Name() string { return Name }
@@ -80,7 +103,7 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 		return nil
 	}
 
-	baseRef, err := e.resolveBaseRef(bundle)
+	baseRef, err := e.resolveBaseRef(ctx, sbom, bundle)
 	if err != nil || baseRef == "" {
 		e.handleNoBase(logger, sbom, baseRef, err)
 		stampStrategy(sbom, "unavailable")
@@ -339,24 +362,89 @@ func logFallback(logger *slog.Logger, reason, baseRef string, err error, advice 
 }
 
 // resolveBaseRef returns the base image reference to compare against,
-// honouring Mode.
-func (e *Enricher) resolveBaseRef(bundle *image.Bundle) (string, error) {
+// honouring Mode. Under ModeAuto, the label-based path runs first;
+// when it returns empty, the S4-Task-6 content-based detector
+// (os-release + bundled known-bases) attempts a confident match
+// before we fall through to the no-base path. The detection method
+// + identity signals are stamped on sbom.Metadata.Properties via
+// stampDetectionMetadata.
+func (e *Enricher) resolveBaseRef(ctx context.Context, sbom *model.SBOM, bundle *image.Bundle) (string, error) {
 	switch e.opts.Mode {
 	case ModeExplicit:
 		if e.opts.Reference == "" {
 			return "", fmt.Errorf("basediff: explicit mode requires Options.Reference")
 		}
+		stampDetectionMetadata(sbom, &AutoDetectionResult{
+			BaseImageRef: e.opts.Reference,
+			Confidence:   1.0,
+			Method:       "user-explicit",
+		})
 		return e.opts.Reference, nil
+
 	case ModeAuto:
 		cfg, err := bundle.Image.ConfigFile()
 		if err != nil {
 			return "", fmt.Errorf("read image config: %w", err)
 		}
-		return detectFromLabels(cfg), nil
+		if ref := detectFromLabels(cfg); ref != "" {
+			stampDetectionMetadata(sbom, &AutoDetectionResult{
+				BaseImageRef: ref,
+				Confidence:   1.0,
+				Method:       "label",
+			})
+			return ref, nil
+		}
+		if e.detector == nil {
+			stampDetectionMetadata(sbom, &AutoDetectionResult{
+				FallbackReason: "content-based detection disabled",
+			})
+			return "", nil
+		}
+		result, derr := e.detector.Detect(ctx, bundle.Image)
+		if derr != nil {
+			return "", fmt.Errorf("basediff: content-based detection: %w", derr)
+		}
+		stampDetectionMetadata(sbom, result)
+		return result.BaseImageRef, nil
+
 	case ModeNone:
 		return "", nil
 	default:
 		return "", fmt.Errorf("basediff: unknown mode %d", e.opts.Mode)
+	}
+}
+
+// stampDetectionMetadata records the AutoDetector's outcome on
+// sbom.Metadata.Properties so SBOM consumers can tell apart
+// label-based / content-based / explicit / no-detection outcomes
+// without parsing logs. Idempotent. S4 Task 6.
+func stampDetectionMetadata(sbom *model.SBOM, r *AutoDetectionResult) {
+	if sbom == nil || r == nil {
+		return
+	}
+	if sbom.Metadata.Properties == nil {
+		sbom.Metadata.Properties = map[string]string{}
+	}
+	if r.Method != "" {
+		sbom.Metadata.Properties["astinus:basediff:detection-method"] = r.Method
+	}
+	if r.BaseImageRef != "" {
+		sbom.Metadata.Properties["astinus:basediff:detected-base"] = r.BaseImageRef
+	}
+	if r.Confidence > 0 {
+		sbom.Metadata.Properties["astinus:basediff:detection-confidence"] =
+			fmt.Sprintf("%.2f", r.Confidence)
+	}
+	if r.OSReleaseID != "" {
+		sbom.Metadata.Properties["astinus:basediff:os-release-id"] = r.OSReleaseID
+	}
+	if r.OSReleaseVersionID != "" {
+		sbom.Metadata.Properties["astinus:basediff:os-release-version-id"] =
+			r.OSReleaseVersionID
+	}
+	if r.FallbackReason != "" {
+		sbom.Metadata.Properties["astinus:basediff:detection-fallback-reason"] =
+			r.FallbackReason
 	}
 }
 

@@ -1,0 +1,170 @@
+{
+  "schema_version": "1",
+  "captured_at": "2026-05-13T00:00:00Z",
+  "next_update_due": "2026-08-13T00:00:00Z",
+  "entries": [
+    {
+      "id": "alpine",
+      "version_id": "3.18",
+      "image_ref": "alpine:3.18",
+      "sample_file_paths": [
+        "etc/alpine-release",
+        "etc/apk/repositories",
+        "lib/apk/db/installed",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "alpine",
+      "version_id": "3.19",
+      "image_ref": "alpine:3.19",
+      "sample_file_paths": [
+        "etc/alpine-release",
+        "etc/apk/repositories",
+        "lib/apk/db/installed",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "alpine",
+      "version_id": "3.20",
+      "image_ref": "alpine:3.20",
+      "sample_file_paths": [
+        "etc/alpine-release",
+        "etc/apk/repositories",
+        "lib/apk/db/installed",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "alpine",
+      "version_id": "3.21",
+      "image_ref": "alpine:3.21",
+      "sample_file_paths": [
+        "etc/alpine-release",
+        "etc/apk/repositories",
+        "lib/apk/db/installed",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "alpine",
+      "version_id": "3.22",
+      "image_ref": "alpine:3.22",
+      "sample_file_paths": [
+        "etc/alpine-release",
+        "etc/apk/repositories",
+        "lib/apk/db/installed",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "alpine",
+      "version_id": "3.23",
+      "image_ref": "alpine:3.23",
+      "sample_file_paths": [
+        "etc/alpine-release",
+        "etc/apk/repositories",
+        "lib/apk/db/installed",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "debian",
+      "version_id": "11",
+      "image_ref": "debian:11-slim",
+      "sample_file_paths": [
+        "etc/debian_version",
+        "etc/apt/sources.list",
+        "var/lib/dpkg/status",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "debian",
+      "version_id": "12",
+      "image_ref": "debian:12-slim",
+      "sample_file_paths": [
+        "etc/debian_version",
+        "etc/apt/sources.list.d/debian.sources",
+        "var/lib/dpkg/status",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "ubuntu",
+      "version_id": "20.04",
+      "image_ref": "ubuntu:20.04",
+      "sample_file_paths": [
+        "etc/lsb-release",
+        "etc/apt/sources.list",
+        "var/lib/dpkg/status",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "ubuntu",
+      "version_id": "22.04",
+      "image_ref": "ubuntu:22.04",
+      "sample_file_paths": [
+        "etc/lsb-release",
+        "etc/apt/sources.list",
+        "var/lib/dpkg/status",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "ubuntu",
+      "version_id": "24.04",
+      "image_ref": "ubuntu:24.04",
+      "sample_file_paths": [
+        "etc/lsb-release",
+        "etc/apt/sources.list.d/ubuntu.sources",
+        "var/lib/dpkg/status",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "almalinux",
+      "version_id": "9",
+      "image_ref": "almalinux:9",
+      "sample_file_paths": [
+        "etc/almalinux-release",
+        "var/lib/rpm/Packages.db",
+        "etc/redhat-release",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "rocky",
+      "version_id": "9",
+      "image_ref": "rockylinux:9",
+      "sample_file_paths": [
+        "etc/rocky-release",
+        "etc/redhat-release",
+        "var/lib/rpm/Packages.db",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "rhel",
+      "version_id": "9",
+      "image_ref": "registry.access.redhat.com/ubi9/ubi-minimal",
+      "sample_file_paths": [
+        "etc/redhat-release",
+        "var/lib/rpm/rpmdb.sqlite",
+        "etc/os-release"
+      ]
+    },
+    {
+      "id": "debian",
+      "version_id": "12",
+      "image_ref": "gcr.io/distroless/base-debian12",
+      "sample_file_paths": [
+        "etc/os-release",
+        "etc/passwd",
+        "etc/group"
+      ]
+    }
+  ]
+}

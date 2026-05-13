@@ -11,6 +11,29 @@ public CLI / output surface.
 
 ## Unreleased
 
+### Added
+
+- **Content-based base-image detection.** `--base auto` (the
+  default) now falls back to reading `/etc/os-release` (or
+  `usr/lib/os-release` / `etc/alpine-release`) when the target
+  image carries no `org.opencontainers.image.base.*` labels —
+  which is true of ~80 % of public Docker Hub images (Grafana,
+  Postgres, Redis, Nginx, MongoDB, MySQL, Apache, Tomcat, …).
+  The parsed OS-release identity is matched against a bundled
+  `data/known_bases.json` catalogue (15 entries on initial ship:
+  alpine 3.18-3.23, debian 11-12, ubuntu 20.04-24.04, almalinux
+  9, rocky 9, RHEL UBI 9, distroless base-debian12). Detection
+  outcome stamps `astinus:basediff:detection-method`,
+  `astinus:basediff:detected-base`,
+  `astinus:basediff:detection-confidence`,
+  `astinus:basediff:os-release-id`,
+  `astinus:basediff:os-release-version-id`, and (on a no-detection
+  outcome) `astinus:basediff:detection-fallback-reason` on
+  `sbom.Metadata.Properties` so downstream consumers can branch
+  on the result without parsing logs. Label-based detection still
+  runs first and short-circuits the pipeline at 1.0 confidence
+  when labels are present. (ADR-0045, S4 Task 6.)
+
 ### Fixed
 
 - **Oversize files no longer abort the untracked walk.** A single
