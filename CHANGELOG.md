@@ -13,6 +13,26 @@ public CLI / output surface.
 
 ### Fixed
 
+- **CPE 2.3 attribute values now backslash-escape special characters
+  per NIST IR 7695 §6.1.2.5.** Previous build emitted literal `:` and
+  `+` inside the version slot, which made round-trip `Parse(Build(...))`
+  silently reject the URI (`cpe23Regex`'s `[^:]*` slot pattern saw the
+  embedded `:` as a slot boundary), and intermediate tooling layers
+  URL-encoded the unescaped output as `%3A` / `%2B` — also
+  non-conformant. Affected every deb package with epoch versions
+  (`libcap2 1:2.75-10+b8`, `libaudit-common 1:4.0.2-2`, …) plus any
+  `+` / `@` / `?` / `/` etc. in the slot. Run #4 measured 27 affected
+  CPEs on D-postgres and ≥ 2 on B-airflow; not visible on Alpine
+  images (apk versions don't carry the spec special chars). New
+  `EscapeCPE23Attribute` / `UnescapeCPE23Attribute` + escape-aware
+  `splitCPEv23` cover all 27 spec characters; `cpe.Build` +
+  `CPEv23.String` now route every attribute through them. `Parse`
+  unescapes attribute values so callers see the human-readable form.
+  `applyVersionNormalization` + `cpeVendor` switched to the
+  escape-aware splitter so the S5-T3 v-prefix strip + S4-T3 vendor
+  reject still work on deb-epoch CPEs. Syft-inherit path unchanged
+  (Syft is already spec-correct). See ADR-0058.
+
 - **CPE enricher now bounded by per-call (10 s), per-source (60 s),
   and total-phase (3 m) wall-time timeouts.** Previous builds could
   hang indefinitely on established but idle TCP connections to

@@ -182,27 +182,35 @@ func identityVersion(v string) string { return v }
 //
 //	cpe:2.3:<part>:<vendor>:<product>:<version>:<update>:<edition>:
 //	    <language>:<sw_edition>:<target_sw>:<target_hw>:<other>
+//
+// The normalization function operates on the human-readable
+// (unescaped) version slot — callers don't have to know about
+// CPE 2.3 backslash-escapes. The slot is unescaped before fn runs
+// and re-escaped after. ADR-0058 (S6 Task 1).
 func applyVersionNormalization(cpe string, fn func(string) string) string {
 	if fn == nil {
 		return cpe
 	}
-	parts := strings.SplitN(cpe, ":", 13)
-	if len(parts) < 6 || parts[0] != "cpe" {
+	parts, ok := splitCPEv23(cpe)
+	if !ok {
 		return cpe
 	}
-	parts[5] = fn(parts[5])
+	parts[5] = EscapeCPE23Attribute(fn(UnescapeCPE23Attribute(parts[5])))
 	return strings.Join(parts, ":")
 }
 
 // cpeVendor returns the vendor segment (field index 3) of a CPE 2.3
-// URI, lowercased. Returns "" when the input doesn't parse as CPE
-// 2.3.
+// URI, lowercased + unescaped. Returns "" when the input doesn't
+// parse as CPE 2.3. S6 Task 1: switched from `strings.Split(cpe,
+// ":")` to `splitCPEv23` so escaped colons inside earlier slots
+// (e.g. in pathological future schemas) don't shift the vendor
+// index.
 func cpeVendor(cpe string) string {
-	parts := strings.Split(cpe, ":")
-	if len(parts) < 4 || parts[0] != "cpe" {
+	parts, ok := splitCPEv23(cpe)
+	if !ok {
 		return ""
 	}
-	return strings.ToLower(parts[3])
+	return strings.ToLower(UnescapeCPE23Attribute(parts[3]))
 }
 
 // matchesAnyVendor reports whether vendor equals (case-insensitive)

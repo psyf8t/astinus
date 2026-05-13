@@ -49,77 +49,98 @@ type CPEv23 struct {
 	Other     string
 }
 
-// String formats c as a canonical CPE 2.3 URI.
+// String formats c as a canonical CPE 2.3 URI. Special characters in
+// each attribute value (`:`, `+`, `@`, …) are backslash-escaped per
+// NIST IR 7695 §6.1.2.5 — Debian-style versions like `1:2.75-10+b8`
+// render as `1\:2.75-10\+b8`. Empty slots become the wildcard `*`.
+// ADR-0058.
 func (c CPEv23) String() string {
 	return fmt.Sprintf("cpe:2.3:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s",
-		orStar(c.Part),
-		orStar(c.Vendor),
-		orStar(c.Product),
-		orStar(c.Version),
-		orStar(c.Update),
-		orStar(c.Edition),
-		orStar(c.Language),
-		orStar(c.SwEdition),
-		orStar(c.TargetSw),
-		orStar(c.TargetHw),
-		orStar(c.Other),
+		escapeOrPart(c.Part),
+		EscapeCPE23Attribute(c.Vendor),
+		EscapeCPE23Attribute(c.Product),
+		EscapeCPE23Attribute(c.Version),
+		EscapeCPE23Attribute(c.Update),
+		EscapeCPE23Attribute(c.Edition),
+		EscapeCPE23Attribute(c.Language),
+		EscapeCPE23Attribute(c.SwEdition),
+		EscapeCPE23Attribute(c.TargetSw),
+		EscapeCPE23Attribute(c.TargetHw),
+		EscapeCPE23Attribute(c.Other),
 	)
 }
 
-// cpe23Regex is a relaxed CPE 2.3 validator. It enforces the prefix
-// + part + the 10 attribute slots; we leave the deeper character set
-// rules (CPE allows escaped colons via `\:`) to libraries that need
-// strict NVD-grade validation. For SBOM enrichment, "shape is right"
-// is enough.
-var cpe23Regex = regexp.MustCompile(
-	`^cpe:2\.3:[aoh\*]:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*$`,
-)
+// cpe23Regex is the structural check for the CPE 2.3 prefix + part
+// fields. Slot validation is delegated to splitCPEv23 (which honours
+// `\:` escapes per ADR-0058); the regex only confirms the prefix
+// matches and the part attribute is one of `a` / `o` / `h` / `*`.
+var cpe23Regex = regexp.MustCompile(`^cpe:2\.3:[aoh\*]:`)
 
 // IsValidCPE reports whether s looks like a syntactically valid
-// CPE 2.3 URI.
-func IsValidCPE(s string) bool { return cpe23Regex.MatchString(s) }
+// CPE 2.3 URI: correct prefix + part, and exactly 11 attribute slots
+// once escaped colons are honoured.
+func IsValidCPE(s string) bool {
+	if !cpe23Regex.MatchString(s) {
+		return false
+	}
+	_, ok := splitCPEv23(s)
+	return ok
+}
 
 // Parse converts a CPE 2.3 URI into the structured form. Returns an
 // error when the input does not match the canonical layout.
+//
+// Attribute values are unescaped before being returned, so callers
+// see the human-readable form (`1:2.75-10+b8`, not `1\:2.75-10\+b8`).
+// ADR-0058.
 func Parse(s string) (CPEv23, error) {
-	if !IsValidCPE(s) {
+	if !cpe23Regex.MatchString(s) {
 		return CPEv23{}, fmt.Errorf("cpe: invalid 2.3 URI %q", s)
 	}
-	parts := strings.SplitN(s, ":", 13)
+	parts, ok := splitCPEv23(s)
+	if !ok {
+		return CPEv23{}, fmt.Errorf("cpe: invalid 2.3 URI %q", s)
+	}
 	// parts[0]="cpe", parts[1]="2.3", parts[2..12] = the 11 attributes.
 	return CPEv23{
 		Part:      parts[2],
-		Vendor:    parts[3],
-		Product:   parts[4],
-		Version:   parts[5],
-		Update:    parts[6],
-		Edition:   parts[7],
-		Language:  parts[8],
-		SwEdition: parts[9],
-		TargetSw:  parts[10],
-		TargetHw:  parts[11],
-		Other:     parts[12],
+		Vendor:    UnescapeCPE23Attribute(parts[3]),
+		Product:   UnescapeCPE23Attribute(parts[4]),
+		Version:   UnescapeCPE23Attribute(parts[5]),
+		Update:    UnescapeCPE23Attribute(parts[6]),
+		Edition:   UnescapeCPE23Attribute(parts[7]),
+		Language:  UnescapeCPE23Attribute(parts[8]),
+		SwEdition: UnescapeCPE23Attribute(parts[9]),
+		TargetSw:  UnescapeCPE23Attribute(parts[10]),
+		TargetHw:  UnescapeCPE23Attribute(parts[11]),
+		Other:     UnescapeCPE23Attribute(parts[12]),
 	}, nil
 }
 
 // Build returns a CPE 2.3 URI for an application component with the
 // given vendor / product / version. All other attributes are `*`.
 //
-// vendor and product are lowercased; spaces and dots are not touched
-// because real CPE entries (e.g. `apache_log_4j`) preserve them.
-// Pass empty version to get a wildcard match across all versions.
+// vendor and product are lowercased; spaces and dots are preserved
+// because real CPE entries (e.g. `apache_log_4j`) keep them. Special
+// characters (`:`, `+`, `@`, etc.) are backslash-escaped per
+// NIST IR 7695 §6.1.2.5 — pass `1:2.75-10+b8` as version, get back
+// `cpe:2.3:a:libcap2:libcap2:1\:2.75-10\+b8:*:...`. Pass empty
+// version to wildcard the slot. ADR-0058.
 func Build(vendor, product, version string) string {
 	c := CPEv23{
 		Part:    "a",
 		Vendor:  strings.ToLower(vendor),
 		Product: strings.ToLower(product),
-		Version: orStar(version),
+		Version: version,
 	}
 	return c.String()
 }
 
-// orStar returns s when non-empty, otherwise the CPE wildcard "*".
-func orStar(s string) string {
+// escapeOrPart projects the part field — it's the only slot where
+// `*` is a structural part of the URI (parsed by the cpe23Regex
+// directly) rather than a wildcard sentinel substitute for empty;
+// empty input still maps to `*`, but we never escape the literal `*`.
+func escapeOrPart(s string) string {
 	if s == "" {
 		return "*"
 	}
