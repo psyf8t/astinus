@@ -128,6 +128,19 @@ type enrichOptions struct {
 	// which corner of the contract fired without parsing logs.
 	// S5 Task 4.
 	cpeUsedSources []string
+	// cpeTotalTimeout is the wall-time cap on the CPE enricher
+	// phase. Default 3m; the cap protects against idle TCP
+	// connections to online sources that no per-call timeout
+	// covered pre-S6 (run #4 reproducer: 19-minute hang on
+	// Cloudflare-fronted CPE source). Auto mode emits partial
+	// results when the cap fires; hybrid exits 60. S6 Task 0.
+	cpeTotalTimeout time.Duration
+	// cpeSourceTimeout is the per-source cumulative budget — once
+	// elapsed, that source is skipped for the rest of the run.
+	// Default 60s.
+	cpeSourceTimeout time.Duration
+	// cpeCallTimeout is the per-HTTP-call deadline. Default 10s.
+	cpeCallTimeout time.Duration
 	// nvdAPIKey is the NVD API key (env: NVD_API_KEY).
 	// PRSD-Task-5.
 	nvdAPIKey string
@@ -292,6 +305,25 @@ add the others.`,
 			"actually used / skipped (with reasons) are stamped on the "+
 			"output SBOM as astinus:cpe:mode, astinus:cpe:sources-used, "+
 			"astinus:cpe:sources-skipped.")
+	flags.DurationVar(&opts.cpeTotalTimeout, "cpe-total-timeout",
+		cpe.DefaultTotalCap,
+		"Wall-time cap on the entire CPE enricher phase. When the cap "+
+			"fires in --cpe-mode auto the run emits a partial-enriched "+
+			"SBOM with astinus:cpe:total-cap-hit=true; --cpe-mode hybrid "+
+			"exits 60. Tune up for very large monorepo SBOMs (10k+ "+
+			"components). Default: 3m. S6 Task 0 / ADR-0057.")
+	flags.DurationVar(&opts.cpeSourceTimeout, "cpe-source-timeout",
+		cpe.DefaultSourceTimeout,
+		"Per-source cumulative budget across the entire CPE phase. After "+
+			"the budget elapses the source is skipped for the remainder "+
+			"of the run with astinus:cpe:source-status:<name>=budget-"+
+			"exhausted:<budget>. Default: 60s. S6 Task 0.")
+	flags.DurationVar(&opts.cpeCallTimeout, "cpe-call-timeout",
+		cpe.DefaultCallTimeout,
+		"Per-HTTP-call deadline inside the CPE enricher. A call that "+
+			"hits the deadline marks its source unavailable for the run "+
+			"(--cpe-mode auto: skip; --cpe-mode hybrid: exit 60). "+
+			"Default: 10s. S6 Task 0.")
 	flags.StringVar(&opts.nvdAPIKey, "nvd-api-key", "",
 		"NVD API key (env: NVD_API_KEY). Higher rate limit (50 req / 30s vs 5 req / 30s)")
 	flags.StringVar(&opts.nvdAPIURL, "nvd-api-url", "",
@@ -466,7 +498,7 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 		// counter increment to land. Errors during export are
 		// logged but do not mask the original Run error.
 		writeMetrics(opts.metricsOutput, registry, logger)
-		return newExitError(ExitEnrich, err)
+		return mapPipelineError(err)
 	}
 	writeMetrics(opts.metricsOutput, registry, logger)
 
@@ -1102,9 +1134,11 @@ func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Lo
 	usedSources = append(usedSources, "heuristic")
 
 	resolver := cpesources.NewMultiSource(cpesources.Options{
-		Mode:    mode,
-		Sources: srcs,
-		Logger:  logger,
+		Mode:             mode,
+		Sources:          srcs,
+		Logger:           logger,
+		PerSourceTimeout: opts.cpeSourceTimeout,
+		PerCallTimeout:   opts.cpeCallTimeout,
 	})
 	logger.Info("cpe.resolver.configured",
 		"mode", string(mode),
@@ -1113,11 +1147,17 @@ func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Lo
 		"nvd_skipped", nvdSkipped,
 		"used_sources", usedSources,
 		"skipped_sources", skippedSources,
-		"include_rejected", opts.includeRejectedCPE)
+		"include_rejected", opts.includeRejectedCPE,
+		"total_cap", opts.cpeTotalTimeout,
+		"source_timeout", opts.cpeSourceTimeout,
+		"call_timeout", opts.cpeCallTimeout)
 	opts.cpeModeEffective = string(mode)
 	opts.cpeUsedSources = usedSources
 	opts.cpeSkippedSources = skippedSources
-	return cpe.NewWithResolver(resolver).WithIncludeRejected(opts.includeRejectedCPE), nil
+	return cpe.NewWithResolver(resolver).
+		WithIncludeRejected(opts.includeRejectedCPE).
+		WithTotalCap(opts.cpeTotalTimeout).
+		WithStrictMode(mode.IsStrict()), nil
 }
 
 // buildRegistryEnricher composes the S3-Task-4 registry enricher

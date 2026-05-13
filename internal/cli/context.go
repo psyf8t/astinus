@@ -3,7 +3,10 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+
+	"github.com/psyf8t/astinus/internal/enrich/cpe"
 )
 
 // loggerKey is the context key used to attach the configured *slog.Logger.
@@ -54,4 +57,20 @@ func (e *exitError) Unwrap() error { return e.err }
 // to import errors just for the type assertion.
 func asExitError(err error, target **exitError) bool {
 	return errors.As(err, target)
+}
+
+// mapPipelineError translates a non-nil pipeline error to the
+// appropriate exit code. cpe.ErrSourceUnavailable (S6 Task 0 strict-
+// mode timeout) becomes ExitCPESourceUnavailable=60 with the
+// actionable resolution hint; everything else stays
+// ExitEnrich=ExitInvalidArgs+offsets per the legacy contract.
+// Extracted from runEnrich so the latter stays under the gocyclo
+// budget (S6 Task 0). ADR-0051 + ADR-0057.
+func mapPipelineError(err error) error {
+	if errors.Is(err, cpe.ErrSourceUnavailable) {
+		return newExitError(ExitCPESourceUnavailable,
+			fmt.Errorf("cpe-mode=hybrid: source unavailable (per-call or total wall-time bound fired); "+
+				"resolve by setting NVD_API_KEY, using --cpe-mode=auto, or --cpe-mode=offline"))
+	}
+	return newExitError(ExitEnrich, err)
 }

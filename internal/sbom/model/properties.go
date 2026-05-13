@@ -57,6 +57,30 @@ const (
 	// S5 Task 4 finalised format). Empty when every recognised
 	// source ran.
 	PropertyCPESourcesSkipped = "astinus:cpe:sources-skipped"
+	// PropertyCPETotalCapHit is "true" when the CPE enricher's
+	// total wall-time cap (`--cpe-total-timeout`, default 3 m)
+	// fired and the run emitted a partial-enriched SBOM. Absent
+	// or "false" when the enricher completed inside the budget.
+	// S6 Task 0 / ADR-0057.
+	PropertyCPETotalCapHit = "astinus:cpe:total-cap-hit"
+	// PropertyCPEElapsedSeconds is the wall-time the CPE enricher
+	// spent on this run, rendered as a 2-decimal seconds value.
+	// Operator diagnostic — pairs with PropertyCPETotalCapHit.
+	// S6 Task 0.
+	PropertyCPEElapsedSeconds = "astinus:cpe:elapsed-seconds"
+	// PropertyCPEComponentsProcessed records how many components
+	// the enricher walked before exiting. Equals the SBOM's
+	// component count on a clean finish; less than it when the
+	// total cap fired. S6 Task 0.
+	PropertyCPEComponentsProcessed = "astinus:cpe:components-processed"
+	// PropertyCPESourceStatusPrefix is the per-source completion-
+	// status property family: `astinus:cpe:source-status:<name>`
+	// carries one of `complete`, `budget-exhausted:<duration>`,
+	// `timeout`, `errored`, or the same `<source>:<reason>`
+	// vocabulary the sources-skipped list uses. Lets operators
+	// see per-source outcome without parsing the aggregate lists.
+	// S6 Task 0 / ADR-0057.
+	PropertyCPESourceStatusPrefix = "astinus:cpe:source-status:"
 
 	// Top-level metadata stamp emitted on every Astinus-touched SBOM.
 	PropertyEnrichedBy      = "astinus:enriched-by"

@@ -11,6 +11,48 @@ public CLI / output surface.
 
 ## Unreleased
 
+### Fixed
+
+- **CPE enricher now bounded by per-call (10 s), per-source (60 s),
+  and total-phase (3 m) wall-time timeouts.** Previous builds could
+  hang indefinitely on established but idle TCP connections to
+  online CPE sources — run #4 reproducer on `apache/airflow:slim-
+  latest` (≈2400 components) sat at 0% CPU for over 6 minutes mid-
+  enrich and was killed after 19 minutes. Root cause was a
+  combination of the `cpe.Resolver` interface dropping the
+  enricher's `context.Context` (the orchestrator fabricated
+  `context.Background()` internally, so cancellation never reached
+  the rate limiter) and anonymous NVD's 5-req/30-s token bucket
+  amplifying any single hung call into a multi-hour Wait. Fix
+  layers three bounds:
+  - **Per-call HTTP deadline** via `context.WithTimeout` in
+    `MultiSourceResolver.callSource` — applies to every Source's
+    `Match` invocation regardless of `http.Client.Timeout`.
+  - **Per-source `SourceBudget`** caps cumulative time any single
+    online source can consume across a run; once exhausted the
+    source is silently skipped for the remaining components.
+  - **Total enricher cap** wraps `Enricher.Enrich(ctx, ...)` with
+    `context.WithTimeout(ctx, totalCap)`; the walk exits cleanly
+    on cap-fire and stamps SBOM metadata.
+  Three new CLI flags expose the bounds:
+  `--cpe-total-timeout` (3 m default), `--cpe-source-timeout`
+  (60 s), `--cpe-call-timeout` (10 s). New opt-in interface
+  `cpe.ContextResolver` propagates ctx end-to-end while preserving
+  the legacy `Resolver` contract for the bundled/heuristic chain.
+  Mode-specific behaviour preserves the ADR-0051 contract: in
+  `--cpe-mode auto` a timeout WARNs + emits partial results +
+  exits 0; in `--cpe-mode hybrid` it surfaces
+  `cpe.ErrSourceUnavailable`, which the CLI maps to exit 60
+  (`ExitCPESourceUnavailable`) with an actionable resolution
+  message. New SBOM metadata stamps:
+  `astinus:cpe:total-cap-hit`, `astinus:cpe:elapsed-seconds`,
+  `astinus:cpe:components-processed`, and the per-source
+  `astinus:cpe:source-status:<name>` family carrying
+  `complete` / `budget-exhausted:<dur>` / `timeout` / `errored`.
+  Operators driving large SBOMs now see periodic
+  `cpe.enricher.progress` logs every 100 components or 10 s.
+  See ADR-0057.
+
 ### Added
 
 - **Sprint 5 Phase A acceptance suite (`test/acceptance/sprint5/`).**

@@ -2,9 +2,11 @@ package cpe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/psyf8t/astinus/internal/image"
 	"github.com/psyf8t/astinus/internal/sbom/model"
@@ -12,6 +14,24 @@ import (
 
 // Name is the enricher identifier (`--enable cpe`).
 const Name = "cpe"
+
+// Default wall-time bounds for the CPE enricher. Operators tune via
+// the `--cpe-total-timeout` / `--cpe-source-timeout` /
+// `--cpe-call-timeout` CLI flags. S6 Task 0 / ADR-0057.
+const (
+	DefaultTotalCap         = 3 * time.Minute
+	DefaultSourceTimeout    = 60 * time.Second
+	DefaultCallTimeout      = 10 * time.Second
+	DefaultProgressEveryN   = 100
+	DefaultProgressInterval = 10 * time.Second
+)
+
+// ErrSourceUnavailable is returned from Enrich when the resolver is
+// in --cpe-mode hybrid and a per-call timeout or total cap fires.
+// The CLI maps it to exit 60 (ExitCPESourceUnavailable). Mirrors the
+// orchestrator-layer sentinel in `internal/enrich/cpe/sources`.
+// S6 Task 0 / ADR-0057.
+var ErrSourceUnavailable = errors.New("cpe source unavailable")
 
 // Enricher is the cpe enrich.Enricher implementation.
 //
@@ -36,14 +56,22 @@ type Enricher struct {
 	threshold       Threshold
 	includeRejected bool
 	policies        map[string]*EcosystemPolicy
+	strict          bool // ModeHybrid / ModeOnline — propagate ErrSourceUnavailable
+
+	totalCap         time.Duration
+	progressEveryN   int
+	progressInterval time.Duration
 }
 
 // New returns an Enricher with DefaultChain() and DefaultThreshold().
 func New() *Enricher {
 	return &Enricher{
-		chain:     DefaultChain(),
-		threshold: DefaultThreshold(),
-		policies:  DefaultPolicies(),
+		chain:            DefaultChain(),
+		threshold:        DefaultThreshold(),
+		policies:         DefaultPolicies(),
+		totalCap:         DefaultTotalCap,
+		progressEveryN:   DefaultProgressEveryN,
+		progressInterval: DefaultProgressInterval,
 	}
 }
 
@@ -51,10 +79,45 @@ func New() *Enricher {
 // Useful for tests that want to drive a deterministic chain.
 func NewWithResolver(r Resolver) *Enricher {
 	return &Enricher{
-		chain:     r,
-		threshold: DefaultThreshold(),
-		policies:  DefaultPolicies(),
+		chain:            r,
+		threshold:        DefaultThreshold(),
+		policies:         DefaultPolicies(),
+		totalCap:         DefaultTotalCap,
+		progressEveryN:   DefaultProgressEveryN,
+		progressInterval: DefaultProgressInterval,
 	}
+}
+
+// WithTotalCap sets the wall-time cap on Enrich. Zero disables the
+// cap (legacy / tests). The CLI passes --cpe-total-timeout (default
+// 3 minutes). S6 Task 0 / ADR-0057.
+func (e *Enricher) WithTotalCap(d time.Duration) *Enricher {
+	e.totalCap = d
+	return e
+}
+
+// WithProgressTuning overrides the progress-log cadence. Every N
+// components OR after `interval` of wall-clock, whichever comes
+// first, the enricher emits `cpe.enricher.progress` so operators can
+// see the walk isn't wedged. Pass zero for either to keep the
+// default; pass negative to disable. S6 Task 0.
+func (e *Enricher) WithProgressTuning(everyN int, interval time.Duration) *Enricher {
+	if everyN != 0 {
+		e.progressEveryN = everyN
+	}
+	if interval != 0 {
+		e.progressInterval = interval
+	}
+	return e
+}
+
+// WithStrictMode toggles whether per-call timeouts surface as
+// ErrSourceUnavailable (exit 60 in the CLI) instead of being
+// silently absorbed. Set to true for --cpe-mode hybrid; false for
+// --cpe-mode auto / offline. ADR-0051 + ADR-0057.
+func (e *Enricher) WithStrictMode(b bool) *Enricher {
+	e.strict = b
+	return e
 }
 
 // WithIncludeRejected toggles whether rejected candidates are written
@@ -103,19 +166,43 @@ func (*Enricher) Dependencies() []string { return []string{"untracked", "extract
 // bundle is required for signature compatibility with the pipeline
 // but the cpe enricher does not consume the image — its inputs are
 // purely the SBOM components.
-func (e *Enricher) Enrich(_ context.Context, sbom *model.SBOM, bundle *image.Bundle) error {
+//
+// S6 Task 0: the enricher's wall-time is now bounded by `e.totalCap`
+// (default 3 min). When the cap fires in --cpe-mode auto, Enrich
+// stamps `astinus:cpe:total-cap-hit=true` plus the components-
+// processed count on `sbom.Metadata` and returns nil — the pipeline
+// continues with whatever CPEs were resolved. When the cap fires in
+// strict mode (--cpe-mode hybrid), Enrich returns ErrSourceUnavailable
+// so the CLI can exit 60 per ADR-0051. ADR-0057.
+//
+//nolint:contextcheck // defensive nil-check at the entry point; pipeline always passes a non-nil ctx
+func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.Bundle) error {
 	if sbom == nil {
 		return fmt.Errorf("cpe: nil sbom")
 	}
 	_ = bundle // unused; kept for the Enricher signature
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if e.totalCap > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, e.totalCap)
+		defer cancel()
+	}
+
+	start := time.Now()
 	stats := enrichStats{}
-	walk(sbom.Components, func(c *model.Component) {
-		e.enrichOne(c, &stats)
-	})
+	total := countComponentsRecursive(sbom.Components)
+
+	capHit, strictErr := e.walkWithDeadline(ctx, sbom.Components, total, start, &stats)
+	elapsed := time.Since(start)
+
+	stampEnrichMetadata(sbom, capHit, elapsed, stats.examined, e.resolverStatuses())
 
 	slog.Default().Info("cpe.complete",
 		"components_examined", stats.examined,
+		"components_total", total,
 		"had_cpe_already", stats.hadCPEAlready,
 		"added_cpe", stats.addedCPE,
 		"validated", stats.validated,
@@ -124,8 +211,252 @@ func (e *Enricher) Enrich(_ context.Context, sbom *model.SBOM, bundle *image.Bun
 		"purl_error", stats.purlError,
 		"alternatives_kept", stats.alternativesKept,
 		"rejected", stats.rejectedCount,
+		"total_cap_hit", capHit,
+		"elapsed", elapsed,
 	)
+	if strictErr != nil {
+		return strictErr
+	}
 	return nil
+}
+
+// walkWithDeadline runs enrichOne over every component, but checks
+// ctx.Done() at the head of each iteration so a fired total-cap
+// triggers an orderly exit (vs a hard kill of the in-flight HTTP
+// call). Returns (capHit, strictErr): when ctx.Err() != nil before
+// completion, capHit is true; when the enricher is in strict mode,
+// the function also returns ErrSourceUnavailable so the CLI can
+// exit 60. S6 Task 0.
+func (e *Enricher) walkWithDeadline(
+	ctx context.Context,
+	comps []model.Component,
+	total int,
+	start time.Time,
+	stats *enrichStats,
+) (bool, error) {
+	logger := slog.Default()
+	lastProgress := start
+	strictHit := false
+
+	w := componentWalker{
+		ctx:          ctx,
+		total:        total,
+		start:        start,
+		lastProgress: &lastProgress,
+		logger:       logger,
+		stats:        stats,
+		enrich:       e,
+		strictHit:    &strictHit,
+	}
+	capHit := w.run(comps)
+	if strictHit && e.strict {
+		return capHit, ErrSourceUnavailable
+	}
+	if capHit && e.strict {
+		// Total-cap fired before any per-call timeout did, but the
+		// operator asked for strict semantics — still exit 60.
+		return capHit, ErrSourceUnavailable
+	}
+	return capHit, nil
+}
+
+// componentWalker carries the per-walk state through walkComponents.
+// Field bag rather than method args because the walker recurses into
+// SubComponents and the linter doesn't like 8-arg helpers.
+type componentWalker struct {
+	ctx          context.Context
+	total        int
+	start        time.Time
+	lastProgress *time.Time
+	logger       *slog.Logger
+	stats        *enrichStats
+	enrich       *Enricher
+	strictHit    *bool
+}
+
+// run iterates `comps` (recursing into SubComponents) and returns
+// true when ctx.Done() fired before completion. Each iteration
+// checks for cancellation and emits a progress log when N components
+// or the progress-interval has elapsed since the last one.
+func (w *componentWalker) run(comps []model.Component) bool {
+	for i := range comps {
+		select {
+		case <-w.ctx.Done():
+			w.logger.Warn("cpe.enricher.total-cap-hit",
+				"elapsed", time.Since(w.start),
+				"components_processed", w.stats.examined,
+				"components_remaining", w.total-w.stats.examined,
+				"hint", "increase --cpe-total-timeout or use --cpe-mode offline")
+			return true
+		default:
+		}
+		w.maybeLogProgress()
+		w.enrichOneCtx(&comps[i])
+		if *w.strictHit {
+			return false
+		}
+		if len(comps[i].SubComponents) > 0 {
+			if hit := w.run(comps[i].SubComponents); hit {
+				return true
+			}
+			if *w.strictHit {
+				return false
+			}
+		}
+	}
+	return false
+}
+
+// enrichOneCtx is the ctx-aware sibling of Enricher.enrichOne — it
+// uses ResolveCtx when the resolver supports it so per-call deadlines
+// propagate, and surfaces strict-mode ErrSourceUnavailable through
+// the walker's strictHit flag (the walker stops on the next
+// iteration). S6 Task 0.
+func (w *componentWalker) enrichOneCtx(c *model.Component) {
+	w.stats.examined++
+	clearCPEProperties(c)
+	hadExisting := len(c.CPEs) > 0
+	if hadExisting {
+		w.stats.hadCPEAlready++
+	}
+	cands := candidatesFromExistingCPEs(c.CPEs)
+	if hadExisting {
+		w.stats.validated++
+	}
+	purl, purlErr := ParsePURL(c.PURL)
+	policy := policyForEcosystem(w.enrich.policies, purl.Type)
+	if c.PURL == "" {
+		if !hadExisting {
+			w.stats.noPURL++
+			return
+		}
+		w.enrich.writeResults(c, cands, w.stats, policy)
+		return
+	}
+	if purlErr != nil {
+		w.stats.purlError++
+		setProp(c, "astinus:cpe:purl-error", purlErr.Error())
+		return
+	}
+	resolved, err := w.enrich.resolve(w.ctx, purl)
+	if errors.Is(err, ErrSourceUnavailable) {
+		*w.strictHit = true
+		return
+	}
+	cands = append(cands, resolved...)
+	if len(cands) == 0 {
+		w.stats.noMatch++
+		setProp(c, "astinus:cpe:lookup", "no-match")
+		return
+	}
+	if w.enrich.writeResults(c, cands, w.stats, policy) {
+		w.stats.addedCPE++
+	}
+}
+
+// maybeLogProgress emits cpe.enricher.progress if N components have
+// been processed since the last log or progress-interval has elapsed,
+// whichever comes first.
+func (w *componentWalker) maybeLogProgress() {
+	if w.enrich.progressEveryN <= 0 && w.enrich.progressInterval <= 0 {
+		return
+	}
+	now := time.Now()
+	shouldLogByCount := w.enrich.progressEveryN > 0 &&
+		w.stats.examined > 0 &&
+		w.stats.examined%w.enrich.progressEveryN == 0
+	shouldLogByTime := w.enrich.progressInterval > 0 &&
+		now.Sub(*w.lastProgress) >= w.enrich.progressInterval
+	if !shouldLogByCount && !shouldLogByTime {
+		return
+	}
+	percent := 0.0
+	if w.total > 0 {
+		percent = float64(w.stats.examined) / float64(w.total) * 100
+	}
+	w.logger.Info("cpe.enricher.progress",
+		"processed", w.stats.examined,
+		"total", w.total,
+		"percent", percent,
+		"elapsed", time.Since(w.start))
+	*w.lastProgress = now
+}
+
+// resolve dispatches to ResolveCtx when the underlying resolver
+// supports it (S6 Task 0 — ctx-aware path); otherwise falls back to
+// the context-less Resolve. The ctx-less path is taken by older
+// chains (BundledResolver, HeuristicResolver, Chain) that don't make
+// outbound calls and don't need cancellation.
+//
+//nolint:contextcheck // defensive nil-check; the walker always passes the bounded ctx
+func (e *Enricher) resolve(ctx context.Context, purl PURL) ([]Candidate, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cr, ok := e.chain.(ContextResolver); ok {
+		return cr.ResolveCtx(ctx, purl)
+	}
+	return e.chain.Resolve(purl), nil
+}
+
+// resolverStatuses surfaces per-source completion statuses from the
+// underlying resolver when it tracks them (MultiSourceResolver
+// does). Returns an empty map when the resolver type doesn't, so
+// the caller can range over the result unconditionally.
+func (e *Enricher) resolverStatuses() map[string]string {
+	type statusReporter interface {
+		SourceStatuses() map[string]string
+	}
+	if sr, ok := e.chain.(statusReporter); ok {
+		return sr.SourceStatuses()
+	}
+	return map[string]string{}
+}
+
+// countComponentsRecursive returns the total number of components
+// in the SBOM, including SubComponents. Used for progress-log
+// percentages and the components-remaining warn-log field. Cheap
+// (single pass; no allocations).
+func countComponentsRecursive(comps []model.Component) int {
+	n := 0
+	for i := range comps {
+		n++
+		if len(comps[i].SubComponents) > 0 {
+			n += countComponentsRecursive(comps[i].SubComponents)
+		}
+	}
+	return n
+}
+
+// stampEnrichMetadata writes the S6-T0 wall-time observability
+// stamps onto sbom.Metadata.Properties. Idempotent — overwriting on
+// re-enrich is intentional (latest run wins). Per-source statuses
+// are added under the `astinus:cpe:source-status:<name>` family.
+func stampEnrichMetadata(sbom *model.SBOM, capHit bool, elapsed time.Duration, processed int, statuses map[string]string) {
+	if sbom == nil {
+		return
+	}
+	if sbom.Metadata.Properties == nil {
+		sbom.Metadata.Properties = map[string]string{}
+	}
+	if capHit {
+		sbom.Metadata.Properties[model.PropertyCPETotalCapHit] = "true"
+	} else {
+		sbom.Metadata.Properties[model.PropertyCPETotalCapHit] = "false"
+	}
+	sbom.Metadata.Properties[model.PropertyCPEElapsedSeconds] = fmt.Sprintf("%.2f", elapsed.Seconds())
+	sbom.Metadata.Properties[model.PropertyCPEComponentsProcessed] = fmt.Sprintf("%d", processed)
+
+	// Drop any stale per-source-status entries from a previous run
+	// before writing the new set.
+	for k := range sbom.Metadata.Properties {
+		if strings.HasPrefix(k, model.PropertyCPESourceStatusPrefix) {
+			delete(sbom.Metadata.Properties, k)
+		}
+	}
+	for name, status := range statuses {
+		sbom.Metadata.Properties[model.PropertyCPESourceStatusPrefix+name] = status
+	}
 }
 
 // enrichStats counts what the enricher did across one Enrich call.
@@ -141,63 +472,6 @@ type enrichStats struct {
 	purlError        int // PURL malformed
 	alternativesKept int // count of `astinus:cpe:alternative:N` properties written
 	rejectedCount    int // count of candidates classified as rejected
-}
-
-// enrichOne mutates c in place per the contract above.
-func (e *Enricher) enrichOne(c *model.Component, stats *enrichStats) {
-	stats.examined++
-
-	// Wipe any astinus:cpe:* breadcrumbs from a previous run so re-
-	// enrichment is idempotent and the alternative numbering does
-	// not pile up.
-	clearCPEProperties(c)
-
-	hadExisting := len(c.CPEs) > 0
-	if hadExisting {
-		stats.hadCPEAlready++
-	}
-
-	// Build the candidate slate: existing CPEs + resolver matches.
-	cands := candidatesFromExistingCPEs(c.CPEs)
-	if hadExisting {
-		stats.validated++
-	}
-
-	// Resolve the per-ecosystem CPE policy. PURL parse failure
-	// downgrades the row to the default policy (we still want
-	// classification + property writes to work).
-	purl, purlErr := ParsePURL(c.PURL)
-	policy := policyForEcosystem(e.policies, purl.Type)
-
-	if c.PURL == "" {
-		if !hadExisting {
-			stats.noPURL++
-			return
-		}
-		// No PURL but pre-existing CPEs — apply classification on the
-		// existing ones alone.
-		e.writeResults(c, cands, stats, policy)
-		return
-	}
-
-	if purlErr != nil {
-		stats.purlError++
-		setProp(c, "astinus:cpe:purl-error", purlErr.Error())
-		return
-	}
-
-	cands = append(cands, e.chain.Resolve(purl)...)
-
-	if len(cands) == 0 {
-		stats.noMatch++
-		setProp(c, "astinus:cpe:lookup", "no-match")
-		return
-	}
-
-	addedCPE := e.writeResults(c, cands, stats, policy)
-	if addedCPE {
-		stats.addedCPE++
-	}
 }
 
 // candidatesFromExistingCPEs converts CPE strings already on a
@@ -353,16 +627,6 @@ func contains(xs []string, want string) bool {
 		}
 	}
 	return false
-}
-
-// walk applies fn to every component (recursively into SubComponents).
-func walk(comps []model.Component, fn func(*model.Component)) {
-	for i := range comps {
-		fn(&comps[i])
-		if len(comps[i].SubComponents) > 0 {
-			walk(comps[i].SubComponents, fn)
-		}
-	}
 }
 
 // setProp inserts (key, value) into c.Properties, creating the map

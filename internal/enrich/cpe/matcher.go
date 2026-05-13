@@ -1,6 +1,9 @@
 package cpe
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 // Resolver yields zero or more CPE candidates for a parsed PURL.
 type Resolver interface {
@@ -8,6 +11,24 @@ type Resolver interface {
 	// + nil error means "no match"; non-nil error is reserved for
 	// true failures (the bundled JSON did not load, etc.).
 	Resolve(p PURL) []Candidate
+}
+
+// ContextResolver is the opt-in context-aware variant of Resolver.
+// Resolvers that implement it receive the parent context the
+// enricher was invoked with, so wall-time bounds (total cap, per-
+// source budget) and cancellation propagate end-to-end. S6 Task 0.
+//
+// The enricher type-asserts on this interface; resolvers that don't
+// implement it fall back to the context-less Resolve path.
+type ContextResolver interface {
+	Resolver
+
+	// ResolveCtx mirrors Resolve but accepts the enricher's ctx.
+	// Returning a non-nil error puts the enricher in fail-fast mode
+	// — used by the multi-source orchestrator in --cpe-mode hybrid
+	// to surface ErrSourceUnavailable when a per-call deadline
+	// elapses (ADR-0051 + ADR-0057).
+	ResolveCtx(ctx context.Context, p PURL) ([]Candidate, error)
 }
 
 // versionMatchKind classifies how the PURL version was honoured by
