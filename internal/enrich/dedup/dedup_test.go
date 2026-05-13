@@ -296,6 +296,171 @@ func TestRun_GoBuildinfoBeatsSyftFileRowOnSamePURL(t *testing.T) {
 	}
 }
 
+// ─── S5 Task 3: buildinfo precedence for Go modules (ADR-0050) ───────
+
+// TestPreferBuildinfo_DropsSyftRowAtDifferentVersion — the
+// canonical S5-T3 case. Syft's go-mod-cataloger reports
+// `pkg:golang/example/x@v1.0.0` from parsing go.mod; Astinus
+// reads `debug/buildinfo` and emits the SAME module path at
+// `@v1.2.3` (the version actually compiled). Pre-S5 Run admits
+// both rows as distinct (different canonical PURLs) — Syft's
+// v1.0.0 is then a precision FP. S5-T3 drops the Syft row when
+// a buildinfo row exists at the same module path with a
+// different version.
+func TestPreferBuildinfo_DropsSyftRowAtDifferentVersion(t *testing.T) {
+	in := []model.Component{
+		{
+			Name:    "github.com/sirupsen/logrus",
+			Version: "v1.0.0",
+			PURL:    "pkg:golang/github.com/sirupsen/logrus@v1.0.0",
+			Type:    model.ComponentTypeLibrary,
+			// Syft-style row — no astinus:identified:source.
+			Properties: map[string]string{
+				"syft:location:0:path": "/src/go.mod",
+			},
+		},
+		{
+			Name:    "github.com/sirupsen/logrus",
+			Version: "v1.9.3",
+			PURL:    "pkg:golang/github.com/sirupsen/logrus@v1.9.3",
+			Type:    model.ComponentTypeLibrary,
+			Properties: map[string]string{
+				model.PropertyEvidenceLevel: string(model.EvidenceLevelIdentified),
+				"astinus:identified:source": "go-buildinfo",
+			},
+		},
+	}
+	out, _ := Run(in)
+	if len(out) != 1 {
+		t.Fatalf("len(out) = %d, want 1 (buildinfo wins, syft row dropped); got %+v",
+			len(out), out)
+	}
+	if out[0].Version != "v1.9.3" {
+		t.Errorf("Version = %q, want v1.9.3 (buildinfo row)", out[0].Version)
+	}
+	if out[0].Properties["astinus:identified:source"] != "go-buildinfo" {
+		t.Errorf("identified:source = %q, want go-buildinfo",
+			out[0].Properties["astinus:identified:source"])
+	}
+}
+
+// TestPreferBuildinfo_KeepsSyftRowAtSameVersion — when both rows
+// have the same canonical PURL (same module, same version), the
+// pre-S5 normal PURL-keyed merge handles them (S4-T1 contract).
+// The buildinfo row wins primary, the Syft breadcrumb survives
+// via the property merge. S5-T3 must NOT interfere with this
+// path.
+func TestPreferBuildinfo_KeepsSyftRowAtSameVersion(t *testing.T) {
+	purl := "pkg:golang/github.com/sirupsen/logrus@v1.9.3"
+	in := []model.Component{
+		{
+			Name:    "github.com/sirupsen/logrus",
+			Version: "v1.9.3",
+			PURL:    purl,
+			Type:    model.ComponentTypeFile,
+			Properties: map[string]string{
+				"syft:location:0:path": "/usr/lib/grafana/bin/grafana",
+			},
+		},
+		{
+			Name:    "github.com/sirupsen/logrus",
+			Version: "v1.9.3",
+			PURL:    purl,
+			Type:    model.ComponentTypeLibrary,
+			Properties: map[string]string{
+				model.PropertyEvidenceLevel: string(model.EvidenceLevelIdentified),
+				"astinus:identified:source": "go-buildinfo",
+			},
+		},
+	}
+	out, merged := Run(in)
+	if len(out) != 1 || merged != 1 {
+		t.Fatalf("len(out)=%d merged=%d, want 1+1 (PURL-keyed merge)", len(out), merged)
+	}
+	// S4-T1 contract: buildinfo row wins, syft breadcrumb survives.
+	if out[0].Type != model.ComponentTypeLibrary {
+		t.Errorf("Type = %v, want library", out[0].Type)
+	}
+	if out[0].Properties["syft:location:0:path"] == "" {
+		t.Errorf("syft:location breadcrumb lost — S5-T3 must not break S4-T1 merge")
+	}
+}
+
+// TestPreferBuildinfo_NoOpWithoutBuildinfo — when no buildinfo
+// rows exist, the precedence pass is a no-op. Non-Go-buildinfo
+// inherited rows pass through unchanged.
+func TestPreferBuildinfo_NoOpWithoutBuildinfo(t *testing.T) {
+	in := []model.Component{
+		{
+			Name: "github.com/foo/bar", Version: "v1.0.0",
+			PURL: "pkg:golang/github.com/foo/bar@v1.0.0",
+			Type: model.ComponentTypeLibrary,
+		},
+		{
+			Name: "github.com/baz/qux", Version: "v2.0.0",
+			PURL: "pkg:golang/github.com/baz/qux@v2.0.0",
+			Type: model.ComponentTypeLibrary,
+		},
+	}
+	out, _ := Run(in)
+	if len(out) != 2 {
+		t.Errorf("len(out) = %d, want 2 (no buildinfo → no drops)", len(out))
+	}
+}
+
+// TestPreferBuildinfo_LeavesNonGolangRowsUntouched — the pass
+// only operates on `pkg:golang/...` PURLs. npm / pypi / maven
+// inherited rows alongside Go-buildinfo rows aren't affected.
+func TestPreferBuildinfo_LeavesNonGolangRowsUntouched(t *testing.T) {
+	in := []model.Component{
+		{
+			Name: "lodash", Version: "4.17.21",
+			PURL: "pkg:npm/lodash@4.17.21",
+			Type: model.ComponentTypeLibrary,
+		},
+		{
+			Name: "github.com/foo/bar", Version: "v1.2.3",
+			PURL: "pkg:golang/github.com/foo/bar@v1.2.3",
+			Type: model.ComponentTypeLibrary,
+			Properties: map[string]string{
+				"astinus:identified:source": "go-buildinfo",
+			},
+		},
+	}
+	out, _ := Run(in)
+	if len(out) != 2 {
+		t.Errorf("len(out) = %d, want 2 (npm row preserved)", len(out))
+	}
+	var hasLodash bool
+	for _, c := range out {
+		if c.Name == "lodash" {
+			hasLodash = true
+		}
+	}
+	if !hasLodash {
+		t.Errorf("npm lodash row dropped — golang-only pass widened")
+	}
+}
+
+// TestGoModulePathFromPURL pins the canonical-coordinate helper —
+// strips @version, ?qualifier, #subpath.
+func TestGoModulePathFromPURL(t *testing.T) {
+	cases := map[string]string{
+		"pkg:golang/github.com/foo/bar@v1.0.0":        "pkg:golang/github.com/foo/bar",
+		"pkg:golang/github.com/foo/bar":               "pkg:golang/github.com/foo/bar",
+		"pkg:golang/github.com/foo/bar?vcs_ref=devel": "pkg:golang/github.com/foo/bar",
+		"pkg:golang/github.com/foo/bar@v1#sub":        "pkg:golang/github.com/foo/bar",
+		"pkg:golang/github.com/foo/bar@v1?qual=x#sub": "pkg:golang/github.com/foo/bar",
+		"pkg:npm/lodash@4.17.21":                      "", // non-golang
+		"":                                            "",
+	}
+	for in, want := range cases {
+		if got := goModulePathFromPURL(in); got != want {
+			t.Errorf("goModulePathFromPURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // TestMergePair_FileTypeUpgradedFromSecondary — when both rows have
 // the same dedup key but the primary's Type is `file` and the
 // secondary's is a more-precise type, the merge lifts to the

@@ -80,6 +80,16 @@ func Run(comps []model.Component) ([]model.Component, int) {
 		return comps, 0
 	}
 
+	// S5 Task 3: when a Go-module coordinate (same module path)
+	// shows up with both an Astinus buildinfo row and a Syft-or-
+	// other-inherited row, drop the inherited one BEFORE the
+	// purl-keyed merge. The buildinfo row's version reflects the
+	// actually-compiled module — Syft's `go-mod-cataloger` parses
+	// go.mod / go.sum which can drift (replace directives, vendor
+	// selection, build-cache reuse). Run #3 measured 16 of 19
+	// golang FPs originating from this divergence; ADR-0050.
+	comps = preferBuildinfoForGoModules(comps)
+
 	// Two passes:
 	//   1. Bucket components by dedup key. Components with no key
 	//      (key=="") are appended to a "no-key" pile and pass through.
@@ -422,4 +432,111 @@ func mergeProperties(a, b map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// preferBuildinfoForGoModules drops Syft-inherited (or
+// otherwise-sourced) `pkg:golang/<path>@<version>` rows when an
+// Astinus buildinfo-derived row exists for the SAME module path
+// at a DIFFERENT version. Run #3 benchmark on the Grafana digest
+// measured 16 of 19 golang FPs originating from this divergence:
+// Syft's `go-mod-cataloger` parses go.mod / go.sum (intended
+// dependencies) which can drift from the compiled version due to
+// replace directives, vendor selection, or build-cache reuse.
+// The buildinfo row reads `debug/buildinfo` from the actually-
+// compiled binary and is authoritative.
+//
+// SAME-version overlap (Syft + buildinfo both report the exact
+// canonical PURL) passes through to the normal PURL-keyed merge
+// downstream — that's the S4-T1 contract where syft:location:*
+// breadcrumbs from the Syft row survive the merge while the
+// buildinfo row's evidence-level=identified wins primary. ADR-0050.
+//
+// Components that aren't `pkg:golang/` PURLs pass through
+// untouched.
+func preferBuildinfoForGoModules(comps []model.Component) []model.Component {
+	if len(comps) == 0 {
+		return comps
+	}
+	// First pass: collect the canonical PURLs of buildinfo rows
+	// (already include `@version`) AND the set of module paths
+	// they cover. We drop only non-buildinfo rows whose module
+	// path is in the path set BUT whose canonical PURL isn't in
+	// the exact set — i.e. different-version shadow.
+	buildinfoExactPURLs := make(map[string]bool)
+	buildinfoModulePaths := make(map[string]bool)
+	for i := range comps {
+		c := &comps[i]
+		if !isGolangPURL(c.PURL) {
+			continue
+		}
+		if c.Properties["astinus:identified:source"] != "go-buildinfo" {
+			continue
+		}
+		buildinfoExactPURLs[canonicalPURL(c.PURL)] = true
+		buildinfoModulePaths[goModulePathFromPURL(c.PURL)] = true
+	}
+	if len(buildinfoModulePaths) == 0 {
+		return comps
+	}
+	// Second pass: keep buildinfo rows + non-golang rows + golang
+	// rows whose canonical PURL exactly matches a buildinfo row
+	// (same version → normal merge handles it). Drop golang rows
+	// at the same module path with a different version when a
+	// buildinfo row exists.
+	out := make([]model.Component, 0, len(comps))
+	for i := range comps {
+		c := comps[i]
+		if !isGolangPURL(c.PURL) {
+			out = append(out, c)
+			continue
+		}
+		if c.Properties["astinus:identified:source"] == "go-buildinfo" {
+			out = append(out, c)
+			continue
+		}
+		// Non-buildinfo golang row. Check the two cases.
+		if buildinfoExactPURLs[canonicalPURL(c.PURL)] {
+			// Same module path AND same version as a buildinfo
+			// row — let the normal PURL-keyed merge handle it
+			// (S4-T1 contract: syft:location:* breadcrumb
+			// survives, evidence-level=identified wins primary).
+			out = append(out, c)
+			continue
+		}
+		if buildinfoModulePaths[goModulePathFromPURL(c.PURL)] {
+			// Different version at the same module path — drop
+			// the non-buildinfo row. The buildinfo version is
+			// authoritative.
+			continue
+		}
+		// No buildinfo row at this module path. Pass through —
+		// the inherited entry stays as-is.
+		out = append(out, c)
+	}
+	return out
+}
+
+// isGolangPURL reports whether purl is shaped `pkg:golang/...`.
+func isGolangPURL(purl string) bool {
+	return strings.HasPrefix(purl, "pkg:golang/")
+}
+
+// goModulePathFromPURL returns the module-path coordinate from a
+// golang PURL with version + qualifiers stripped. Empty string for
+// inputs that aren't golang PURLs.
+func goModulePathFromPURL(purl string) string {
+	if !isGolangPURL(purl) {
+		return ""
+	}
+	base := purl
+	if i := strings.IndexByte(base, '@'); i > 0 {
+		base = base[:i]
+	}
+	if j := strings.IndexByte(base, '?'); j > 0 {
+		base = base[:j]
+	}
+	if k := strings.IndexByte(base, '#'); k > 0 {
+		base = base[:k]
+	}
+	return base
 }

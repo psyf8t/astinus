@@ -11,6 +11,22 @@ public CLI / output surface.
 
 ## Unreleased
 
+### Fixed
+
+- **Go module versions resolve to `debug/buildinfo`, not
+  Syft-inherited go.mod/go.sum.** Syft's `go-mod-cataloger`
+  parses source files (intended dependencies) which can drift
+  from the version actually compiled into the binary because of
+  replace directives, vendor selection, or build-cache reuse.
+  Run #3 benchmark on the Grafana digest measured 16 of 19
+  golang FPs originating from this Syft-vs-buildinfo
+  divergence (e.g. Syft said `getkin/kin-openapi @ v0.133.0`,
+  the binary actually has `v0.134.0`). Dedup now drops the
+  Syft-inherited row when an Astinus buildinfo row exists for
+  the same module path at a different version. Same-version
+  overlap (S4-T1 contract: buildinfo primary + Syft breadcrumb
+  merged in) is preserved. (ADR-0050, S5 Task 3.)
+
 ### Changed
 
 - **`astinus:layer:digest` now emits the OCI rootfs `diff_id`**
