@@ -11,6 +11,31 @@ public CLI / output surface.
 
 ## Unreleased
 
+### Added
+
+- **Sprint 5 Phase A acceptance suite (`test/acceptance/sprint5/`).**
+  Ten in-process tests across two sub-suites (`quality/`, `ux/`)
+  pin every Sprint 5 Phase A task's operator-facing contract via
+  the actual `astinus enrich` binary: stdlib CPE keep-primary +
+  non-stdlib still evidence-only (T0), SONAME-derived
+  `pkg:generic/<sonamename>` phantoms stay off the SBOM and
+  library-shaped paths surface as observed-only (T1),
+  `astinus:layer:digest` carries the OCI rootfs diff_id distinct
+  from `astinus:layer:compressed-digest` + round-trips across a
+  re-read/re-enrich (T2), buildinfo version wins over Syft at a
+  different version + same-version overlap keeps the Syft
+  breadcrumb (T3), `--cpe-mode offline` emits reason-encoded
+  `:offline-mode` skipped entries + `--cpe-mode auto` populates
+  `sources-used` + the `--help` text documents the three-state
+  contract (T4). Build tag `acceptance`; full suite hermetic +
+  ≈ 35 s wall-clock on M-class arm64. Pinned-Grafana real-image
+  bundle (`gap_closure_rate ≥ 0.95` / `addition_precision ≥ 0.85` /
+  `golang FPs ≤ 5` / `layer:digest sample accuracy ≥ 17/20`
+  metric gates, Grype delta tests, multi-image anti-overfit gate)
+  explicitly deferred to a Sprint 6 follow-up — documented in
+  `test/acceptance/sprint5/fixtures/README.md`. (ADR-0052,
+  S5 Task 5.)
+
 ### Changed
 
 - **`--cpe-mode` contract finalised + observability widened.**
