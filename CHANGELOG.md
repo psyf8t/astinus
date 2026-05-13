@@ -145,6 +145,45 @@ public CLI / output surface.
 
 ### Added
 
+- **Sprint 6 acceptance suite (`test/acceptance/sprint6/`).**
+  Eleven in-process tests across `quality/` (T0 wall-time
+  metadata stamp; T1 deb-epoch CPE backslash-escape vs
+  URL-percent; T2 apk-earliest layer override; T3 trixie
+  known-bases entry + actionable FallbackReason; T4 python:slim
+  layered chain stamps; T5 multi-`syft:cpe23` alt-CPE
+  preservation) and `features/` (T6 VEX flag round-trip; T7
+  policy deny exits 40; T8 license deny exits 40; T8 license
+  allow stamps; Stage 14 VEX+policy+license composition). Build
+  tag `acceptance`; full suite hermetic + ≈ 20 s wall-clock on
+  M-class arm64. Reuses Sprint 3 helpers (binary builder +
+  RunEnrichOK) and Sprint 4 helpers (OCIImageWithFiles +
+  WriteCDXSBOM + MetadataProperty). 4-image pinned-digest
+  bundle (Grafana / Airflow / Nginx / Postgres + ground-truth
+  JSON + Grype-binary delta gates + per-image metric pins) +
+  CI matrix workflow explicitly deferred to a Sprint 7
+  follow-up. See ADR-0066.
+
+### Fixed
+
+- **Compliance gate metadata stamps now reach the rendered SBOM
+  file.** Pre-S6-T9 `evaluateComplianceGate` ran AFTER the SBOM
+  was rendered to disk in `runPostRenderHooks`, so every VEX /
+  policy / license metadata stamp (`astinus:vex:suppressed:*`,
+  `astinus:policy:hit:*`, `astinus:license:*`) mutated the
+  in-memory SBOM but never landed on the output file.
+  Operator-facing contract regression that escaped because the
+  unit tests called the apply helpers directly on in-memory
+  SBOMs — the binary-level acceptance gates in Sprint 6 Task 9
+  caught it. Fix splits the gate into
+  `decorateComplianceMetadata` (pre-render, mutates SBOM
+  metadata + extends findings) and
+  `enforceComplianceThreshold` (post-render, computes the
+  `--fail-on` decision over the cached findings). New
+  `complianceGateInputs` carries state across the render
+  boundary. See ADR-0066.
+
+### Added
+
 - **License policy — SPDX-based allow/deny gate.** Three new
   flags drive the gate without YAML authoring: `--license-allow
   <SPDX-ID>` (repeatable), `--license-deny <SPDX-ID>`

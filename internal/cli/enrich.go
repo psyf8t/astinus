@@ -464,6 +464,7 @@ add the others.`,
 	return cmd
 }
 
+//nolint:gocyclo // top-level CLI orchestration; complexity dominated by sequential pipeline-setup branches that are clearer inline than extracted
 func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 	logger := LoggerFrom(ctx)
 
@@ -559,6 +560,15 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 	// API key). S4 Task 4.
 	stampCPEModeMetadata(sbom, opts)
 
+	// S6 Tasks 6/7/8: decorate the SBOM with VEX / policy /
+	// license metadata BEFORE the render so the stamps land on
+	// disk. The gate's threshold decision (post-render) reuses
+	// the findings + accounting sets the decorator produced.
+	gateInputs, exitErr := decorateComplianceMetadata(ctx, opts, sbom, logger)
+	if exitErr != nil {
+		return exitErr
+	}
+
 	// ── Step 4: render & write the output ──────────────────────────
 	formatName := opts.outputFormat
 	if formatName == output.FormatSame {
@@ -591,7 +601,7 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 		"output", opts.outputPath,
 		"format", formatName,
 	)
-	return runPostRenderHooks(ctx, opts, sbom, logger, formatName)
+	return runPostRenderHooks(ctx, opts, sbom, logger, formatName, gateInputs)
 }
 
 // runPostRenderHooks fires the operator-visible side effects that
@@ -599,13 +609,15 @@ func runEnrich(ctx context.Context, _ io.Writer, opts *enrichOptions) error {
 // signing (S3 Task 6) and the `--fail-on` compliance gate
 // (PRSD-Task-7). Both produce non-zero exit codes; both leave the
 // SBOM artefact in place.
-func runPostRenderHooks(ctx context.Context, opts *enrichOptions, sbom *model.SBOM, logger *slog.Logger, formatName string) error {
+func runPostRenderHooks(ctx context.Context, opts *enrichOptions, sbom *model.SBOM, logger *slog.Logger, formatName string, gateInputs *complianceGateInputs) error {
 	if exitErr := runSigningStep(ctx, opts, logger, formatName); exitErr != nil {
 		return exitErr
 	}
-	if exitErr := evaluateComplianceGate(ctx, opts, sbom, logger); exitErr != nil {
+	if exitErr := enforceComplianceThreshold(opts, gateInputs, logger); exitErr != nil {
 		return exitErr
 	}
+	_ = ctx
+	_ = sbom
 	return nil
 }
 
@@ -682,23 +694,49 @@ func runSigningStep(ctx context.Context, opts *enrichOptions, logger *slog.Logge
 // statement. Suppressed findings stamp
 // `astinus:vex:suppressed:<CVE-ID>` on SBOM metadata so downstream
 // consumers see what was filtered + why. ADR-0063.
-func evaluateComplianceGate(ctx context.Context, opts *enrichOptions, sbom *model.SBOM, logger *slog.Logger) error {
+// complianceGateInputs is the data the decorator passes to the
+// post-render threshold enforcer. Findings is the FULL set (the
+// compliance enricher's output + any synthetic POLICY-/LICENSE-
+// findings the decorator appended). SuppressedIDs / PolicyAllowed
+// hold the rule-ID sets the threshold subtracts before counting
+// hits. S6 Task 6/7/8.
+type complianceGateInputs struct {
+	Findings      []policy.Finding
+	SuppressedIDs map[string]struct{}
+	PolicyAllowed map[string]struct{}
+	PolicyDenied  map[string]struct{}
+	LicenseDenied int
+}
+
+// decorateComplianceMetadata runs the VEX / policy / license
+// helpers that mutate `sbom.Metadata.Properties` AND append
+// synthetic POLICY-/LICENSE- findings to the in-memory findings
+// slice. Returns the inputs the threshold enforcer needs after
+// the SBOM has been written to disk. ADR-0063 / ADR-0064 /
+// ADR-0065 / S6 Task 9 — the decorator/enforcer split exists
+// because the SBOM is rendered to disk BEFORE the gate decision
+// is made, and the metadata stamps must land on the rendered
+// file.
+func decorateComplianceMetadata(ctx context.Context, opts *enrichOptions, sbom *model.SBOM, logger *slog.Logger) (*complianceGateInputs, error) {
 	licenseOpts := license.Options{
 		Allow:        opts.licenseAllow,
 		Deny:         opts.licenseDeny,
 		RequireKnown: opts.licenseRequireKnown,
 	}
 	if opts.failOn == "" && len(opts.vexFiles) == 0 && len(opts.policyFiles) == 0 && !licenseOpts.IsEnabled() {
-		return nil
+		// No gate config means no decoration. nil-nil is the
+		// agreed "gate disabled" signal —
+		// enforceComplianceThreshold short-circuits on it.
+		return nil, nil //nolint:nilnil // intentional: nil-nil is the disabled-gate sentinel
 	}
 	vexStore, err := vex.LoadStore(opts.vexFiles)
 	if err != nil {
-		return newExitError(ExitInvalidArgs,
+		return nil, newExitError(ExitInvalidArgs,
 			fmt.Errorf("--vex: %w", err))
 	}
 	policies, err := policy.LoadAll(opts.policyFiles)
 	if err != nil {
-		return newExitError(ExitInvalidArgs,
+		return nil, newExitError(ExitInvalidArgs,
 			fmt.Errorf("--policy: %w", err))
 	}
 	enricher := compliance.New()
@@ -707,27 +745,37 @@ func evaluateComplianceGate(ctx context.Context, opts *enrichOptions, sbom *mode
 	policyAllowed, policyDenied := applyPolicies(sbom, &findings, policies, logger)
 	licenseDenied := applyLicenseGate(sbom, &findings, licenseOpts, logger)
 
-	if opts.failOn == "" {
-		// Decorate-only run: VEX + policy + license stamps land,
-		// no gate threshold to enforce.
-		_ = licenseDenied
+	return &complianceGateInputs{
+		Findings:      findings,
+		SuppressedIDs: suppressedIDs,
+		PolicyAllowed: policyAllowed,
+		PolicyDenied:  policyDenied,
+		LicenseDenied: licenseDenied,
+	}, nil
+}
+
+// enforceComplianceThreshold runs the post-render gate decision:
+// counts findings at/above `--fail-on` floor that AREN'T
+// suppressed by VEX or allow-listed by policy. Returns nil when
+// no threshold was set, the gate passes, OR decorateComplianceMetadata
+// short-circuited (gateInputs == nil). S6 Task 9.
+func enforceComplianceThreshold(opts *enrichOptions, gateInputs *complianceGateInputs, logger *slog.Logger) error {
+	if opts.failOn == "" || gateInputs == nil {
 		return nil
 	}
-
 	floor, ok := policy.ParseSeverity(strings.ToLower(strings.TrimSpace(opts.failOn)))
 	if !ok {
 		return newExitError(ExitInvalidArgs, fmt.Errorf("--fail-on: unknown severity %q", opts.failOn))
 	}
-
 	hits := 0
-	for _, f := range findings {
+	for _, f := range gateInputs.Findings {
 		if !f.Severity.AtLeast(floor) {
 			continue
 		}
-		if _, ok := suppressedIDs[f.RuleID]; ok {
+		if _, ok := gateInputs.SuppressedIDs[f.RuleID]; ok {
 			continue
 		}
-		if _, ok := policyAllowed[f.RuleID]; ok {
+		if _, ok := gateInputs.PolicyAllowed[f.RuleID]; ok {
 			continue
 		}
 		hits++
@@ -735,21 +783,21 @@ func evaluateComplianceGate(ctx context.Context, opts *enrichOptions, sbom *mode
 	if hits == 0 {
 		logger.Info("compliance.gate.passed",
 			"floor", floor.String(),
-			"findings_total", len(findings),
-			"vex_suppressed", len(suppressedIDs),
-			"policy_allowed", len(policyAllowed),
-			"policy_denied", len(policyDenied),
-			"license_denied", licenseDenied)
+			"findings_total", len(gateInputs.Findings),
+			"vex_suppressed", len(gateInputs.SuppressedIDs),
+			"policy_allowed", len(gateInputs.PolicyAllowed),
+			"policy_denied", len(gateInputs.PolicyDenied),
+			"license_denied", gateInputs.LicenseDenied)
 		return nil
 	}
 	logger.Warn("compliance.gate.failed",
 		"floor", floor.String(),
 		"findings_at_or_above_floor", hits,
-		"findings_total", len(findings),
-		"vex_suppressed", len(suppressedIDs),
-		"policy_allowed", len(policyAllowed),
-		"policy_denied", len(policyDenied),
-		"license_denied", licenseDenied)
+		"findings_total", len(gateInputs.Findings),
+		"vex_suppressed", len(gateInputs.SuppressedIDs),
+		"policy_allowed", len(gateInputs.PolicyAllowed),
+		"policy_denied", len(gateInputs.PolicyDenied),
+		"license_denied", gateInputs.LicenseDenied)
 	return newExitError(ExitComplianceFail,
 		fmt.Errorf("compliance: %d finding(s) at or above %q severity (run with --fail-on=\"\" to disable the gate)",
 			hits, floor.String()))
