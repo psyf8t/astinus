@@ -252,6 +252,15 @@ func componentFromCDX(c cdx.Component) model.Component {
 	if c.CPE != "" {
 		out.CPEs = append(out.CPEs, c.CPE)
 	}
+	// S6 Task 6: Syft emits multiple CPE candidates per component
+	// via repeating `syft:cpe23` properties (Syft-specific
+	// extension; CycloneDX permits properties with duplicate
+	// names). propsFromCDX above collapses to a single value
+	// because model.Component.Properties is a single-value map.
+	// Harvest the multi-valued shape directly off the cdx side
+	// BEFORE the collapse so alt-CPE candidates survive into the
+	// classifier. ADR-0062.
+	out.CPEs = appendSyftCPEs(out.CPEs, c.Properties)
 	if c.Hashes != nil {
 		out.Hashes = hashesFromCDX(*c.Hashes)
 	}
@@ -364,8 +373,15 @@ func hydrateAstinusFields(c *model.Component) {
 	}
 
 	// Extra CPEs serialized as astinus:cpe:1, astinus:cpe:2, ...
+	// (numeric trailing key only — must NOT match metadata
+	// properties like `astinus:cpe:source`,
+	// `astinus:cpe:confidence`, `astinus:cpe:alternative:1:source`,
+	// etc. The pre-S6 sweep used `strings.HasPrefix("astinus:cpe:")`
+	// which scooped every metadata property into c.CPEs and then
+	// the classifier rejected most of them as invalid — wasteful
+	// and confusing. ADR-0062.
 	for k := range c.Properties {
-		if strings.HasPrefix(k, "astinus:cpe:") {
+		if isNumericExtraCPEKey(k) {
 			c.CPEs = append(c.CPEs, c.Properties[k])
 			delete(c.Properties, k)
 		}
@@ -699,4 +715,59 @@ func float32Ptr(p *float32) float64 {
 		return 0
 	}
 	return float64(*p)
+}
+
+// appendSyftCPEs collects every `syft:cpe23` property value in the
+// raw cdx component into the supplied CPE slice. CycloneDX permits
+// repeating property names; Syft uses this to emit multiple CPE
+// candidates per component (busybox-applet ssl_client gets ~5
+// vendor/product combinations). propsFromCDX collapses to a single
+// value because the canonical model.Component.Properties is a
+// single-value map; this helper preserves the multi-valued shape
+// on the dedicated CPE side. Duplicates against the supplied slice
+// are filtered. S6 Task 5 / ADR-0062.
+func appendSyftCPEs(into []string, in *[]cdx.Property) []string {
+	if in == nil {
+		return into
+	}
+	seen := make(map[string]bool, len(into)+len(*in))
+	for _, c := range into {
+		seen[c] = true
+	}
+	for _, p := range *in {
+		if p.Name != "syft:cpe23" {
+			continue
+		}
+		v := strings.TrimSpace(p.Value)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		into = append(into, v)
+	}
+	return into
+}
+
+// isNumericExtraCPEKey reports whether key matches the
+// `astinus:cpe:<N>` shape Astinus's CDX writer uses for extra
+// CPEs beyond `c.CPEs[0]` — i.e. the suffix after the namespace
+// is a positive decimal integer. Excludes metadata properties like
+// `astinus:cpe:source`, `astinus:cpe:confidence`,
+// `astinus:cpe:alternative:1:source`, which share the prefix but
+// are NOT CPE values. S6 Task 5.
+func isNumericExtraCPEKey(key string) bool {
+	const prefix = "astinus:cpe:"
+	if !strings.HasPrefix(key, prefix) {
+		return false
+	}
+	rest := key[len(prefix):]
+	if rest == "" {
+		return false
+	}
+	for _, r := range rest {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

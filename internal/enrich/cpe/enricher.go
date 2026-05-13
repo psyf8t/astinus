@@ -26,6 +26,12 @@ const (
 	DefaultProgressInterval = 10 * time.Second
 )
 
+// maxAlternativesEmitted caps how many `astinus:cpe:alternative:N`
+// properties the writer emits per component. Defensive against
+// pathological multi-CPE inputs (mass syft:cpe23 entries, manual
+// SBOM editing). S6 Task 5 / ADR-0062.
+const maxAlternativesEmitted = 10
+
 // ErrSourceUnavailable is returned from Enrich when the resolver is
 // in --cpe-mode hybrid and a per-call timeout or total cap fires.
 // The CLI maps it to exit 60 (ExitCPESourceUnavailable). Mirrors the
@@ -539,12 +545,25 @@ func (e *Enricher) writeResults(c *model.Component, cands []Candidate, stats *en
 
 	added := writePrimary(c, primary, originalCPEs, policy)
 
+	// S6 Task 5: cap the alternatives surface so pathological inputs
+	// (mass syft:cpe23 properties on a malformed component, manual
+	// SBOM editing) don't bloat the output indefinitely. Calibrated
+	// at 10 — Grype rarely benefits from > 5 candidates per
+	// component; the cap leaves headroom for genuine multi-product
+	// busybox-style cases. ADR-0062.
+	originalAltCount := len(alts)
+	if len(alts) > maxAlternativesEmitted {
+		alts = alts[:maxAlternativesEmitted]
+	}
 	for i, alt := range alts {
 		idx := i + 1
 		setProp(c, fmt.Sprintf("astinus:cpe:alternative:%d", idx), alt.CPE)
 		setProp(c, fmt.Sprintf("astinus:cpe:alternative:%d:source", idx), string(alt.Source))
 		setProp(c, fmt.Sprintf("astinus:cpe:alternative:%d:confidence", idx), formatConfidence(alt.Confidence))
 		stats.alternativesKept++
+	}
+	if originalAltCount > 0 {
+		setProp(c, "astinus:cpe:alternatives-count", fmt.Sprintf("%d", originalAltCount))
 	}
 
 	for i, rej := range rejected {

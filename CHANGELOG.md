@@ -28,6 +28,34 @@ public CLI / output surface.
   entries are forward-prep for Sprint 6 Task 4 (layered intermediate
   bases on B-airflow). See ADR-0060.
 
+- **Preserve all multi-CPE candidates from Syft input.** Run #4
+  measured one strict Grype TP regression on C-nginx:
+  CVE-2025-60876 on `ssl_client@1.37.0-r30` (Medium) — the package
+  was intact in both SBOMs but Astinus's CPE consolidation
+  dropped the alt-CPE candidates Grype was matching on. Syft emits
+  multiple `syft:cpe23` properties per multi-product package
+  (busybox ssl_client → 5 vendor/product variants); CycloneDX
+  permits duplicate property names but Astinus's CDX reader
+  collapsed them through `map[string]string` and kept only the
+  last. Two coordinated ingest-side fixes plus a defensive cap:
+  - New `appendSyftCPEs` runs at `componentFromCDX` time, walks
+    the raw CDX Property slice (preserves duplicates), and
+    appends every `syft:cpe23` value to `c.CPEs` before
+    `propsFromCDX` collapses.
+  - `hydrateAstinusFields` now uses `isNumericExtraCPEKey` to
+    accept only the `astinus:cpe:<N>` numeric shape — the
+    pre-S6 overbroad `strings.HasPrefix("astinus:cpe:")` sweep
+    swept metadata properties (`:source`, `:confidence`,
+    `:scope`, `:alternative:1:source`, etc.) into `c.CPEs`
+    where the classifier rejected them as malformed CPEs. Noisy
+    + amplified the alt-CPE confusion. Now those properties
+    stay in `c.Properties` where they belong.
+  - `writeResults` caps emitted alternatives at
+    `maxAlternativesEmitted = 10`; `astinus:cpe:alternatives-count`
+    records the pre-cap classifier count so operators see when
+    truncation fired.
+  See ADR-0062.
+
 - **`astinus:origin` on Alpine images now classifies apk packages by
   earliest-introducing layer, not by presence in
   `/lib/apk/db/installed`.** Run #4 measured C-nginx origin accuracy
