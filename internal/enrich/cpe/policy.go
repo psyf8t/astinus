@@ -56,6 +56,32 @@ type EcosystemPolicy struct {
 	// suppressed. Stays empty when the policy doesn't change
 	// Component.CPEs.
 	Rationale string
+
+	// KeepPrimaryPurls is a narrow allow-list of PURL patterns
+	// within this ecosystem that override `EmitPrimary = false`
+	// and keep their primary CPE alongside the rest of the
+	// ecosystem's demotion. S5 Task 0 introduced the field after
+	// the over-broad golang demotion in ADR-0042 swallowed Go
+	// stdlib (`cpe:2.3:a:golang:go:*`), which NVD does register
+	// (351 entries) — net effect on a Grafana benchmark was 22
+	// lost Go-runtime CVE matches vs Syft baseline.
+	//
+	// Pattern format: glob over the canonical PURL minus the
+	// version. Examples:
+	//
+	//	"pkg:golang/stdlib"   exact match against `purl[:idx('@')]`
+	//	"pkg:golang/cmd/*"    prefix glob (suffix `*` only)
+	//
+	// Matching is case-sensitive (PURL spec mandates lowercase
+	// type / namespace / name segments). The check fires after
+	// `RejectVendors` so policy-rejected vendors stay rejected.
+	KeepPrimaryPurls []string
+
+	// KeepPrimaryRationale is stamped on the matched component as
+	// `astinus:cpe:exception-rationale` so SBOM consumers can
+	// distinguish "policy kept this primary" from "policy didn't
+	// fire on this component". S5 Task 0.
+	KeepPrimaryRationale string
 }
 
 // DefaultPolicies returns the per-ecosystem CPE policy table the
@@ -96,6 +122,17 @@ func DefaultPolicies() map[string]*EcosystemPolicy {
 				"creates misleading match surface for vulnerability scanners that " +
 				"key on CPE. The CPE is preserved under astinus:cpe:evidence for " +
 				"audit purposes.",
+			KeepPrimaryPurls: []string{
+				// Go standard library — `vendor=golang, product=go` is
+				// the NVD-registered identifier (351 entries as of
+				// ADR-0047). The over-broad ADR-0042 demotion sent it
+				// to evidence-only, costing 22 Grype matches on a real
+				// Grafana benchmark; this exception restores it.
+				"pkg:golang/stdlib",
+			},
+			KeepPrimaryRationale: "Go standard library is registered in the NVD CPE " +
+				"dictionary as vendor=golang product=go. Primary CPE preserved for " +
+				"vulnerability scanners to match Go runtime CVEs. ADR-0047.",
 		},
 		"npm":   {Ecosystem: "npm", EmitPrimary: true, NormalizeVersion: identityVersion},
 		"pypi":  {Ecosystem: "pypi", EmitPrimary: true, NormalizeVersion: identityVersion},
@@ -174,6 +211,42 @@ func matchesAnyVendor(vendor string, rejectList []string) bool {
 	v := strings.ToLower(vendor)
 	for _, r := range rejectList {
 		if strings.ToLower(r) == v {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesKeepPrimary reports whether the Component's PURL falls
+// inside the ecosystem policy's KeepPrimary allow-list. The match
+// strips the version (`pkg:golang/stdlib@1.25.9` → `pkg:golang/stdlib`)
+// before comparing, since the same PURL coordinate carries every
+// version of the library across catalogue refreshes. Supports
+// exact match and a trailing `*` glob (no other wildcard syntax).
+// S5 Task 0.
+func matchesKeepPrimary(purl string, patterns []string) bool {
+	if purl == "" || len(patterns) == 0 {
+		return false
+	}
+	base := purl
+	if i := strings.IndexByte(purl, '@'); i > 0 {
+		base = purl[:i]
+	}
+	if j := strings.IndexByte(base, '?'); j > 0 {
+		base = base[:j]
+	}
+	for _, pat := range patterns {
+		if pat == "" {
+			continue
+		}
+		if strings.HasSuffix(pat, "*") {
+			prefix := strings.TrimSuffix(pat, "*")
+			if strings.HasPrefix(base, prefix) {
+				return true
+			}
+			continue
+		}
+		if pat == base {
 			return true
 		}
 	}

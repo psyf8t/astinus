@@ -395,14 +395,34 @@ func applyPolicyToCandidates(c *model.Component, cands []Candidate, policy *Ecos
 // row picked up a primary CPE the input didn't already carry.
 // Extracted from writeResults to keep cognitive complexity under
 // the linter budget. S4 Task 3.
+//
+// S5 Task 0: a narrow per-PURL exception (`KeepPrimaryPurls`)
+// overrides EvidenceOnly for components whose PURL coordinate is
+// known to be registered in NVD's CPE dictionary even though the
+// surrounding ecosystem policy demotes everything else (Go
+// stdlib's `cpe:2.3:a:golang:go:*` is the motivating case —
+// ADR-0047).
 func writePrimary(c *model.Component, primary *Candidate, originalCPEs []string, policy *EcosystemPolicy) bool {
+	keepPrimary := primary != nil &&
+		!policy.EmitPrimary &&
+		matchesKeepPrimary(c.PURL, policy.KeepPrimaryPurls)
+
 	switch {
-	case primary != nil && policy.EmitPrimary:
+	case primary != nil && (policy.EmitPrimary || keepPrimary):
 		c.CPEs = []string{primary.CPE}
 		setProp(c, "astinus:cpe:source", string(primary.Source))
 		setProp(c, "astinus:cpe:confidence", formatConfidence(primary.Confidence))
 		if primary.Evidence != "" {
 			setProp(c, "astinus:cpe:evidence", primary.Evidence)
+		}
+		if keepPrimary {
+			// The component would have been demoted to evidence-only
+			// by the ecosystem policy but matched a KeepPrimary entry.
+			// Stamp the exception for audit traceability.
+			setProp(c, "astinus:cpe:exception-applied", "keep-primary")
+			if policy.KeepPrimaryRationale != "" {
+				setProp(c, "astinus:cpe:exception-rationale", policy.KeepPrimaryRationale)
+			}
 		}
 		setValidationStamps(c, originalCPEs)
 		return !contains(originalCPEs, primary.CPE)

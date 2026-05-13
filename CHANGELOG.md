@@ -11,6 +11,26 @@ public CLI / output surface.
 
 ## Unreleased
 
+### Fixed
+
+- **Restored primary CPE for Go standard library components.**
+  The ADR-0042 per-ecosystem demotion was over-broad: it sent
+  every `pkg:golang/*` row to `astinus:cpe:evidence`, including
+  `pkg:golang/stdlib@*` where the inherited CPE is
+  `cpe:2.3:a:golang:go:<version>` — a registered NVD identifier
+  with 351 CPE-aliased entries. The Grafana run-#3 benchmark
+  measured a net Grype-match delta of **−19 vs Syft baseline**,
+  losing 22 Go-runtime CVE matches (11 distinct High/Medium
+  CVEs across go1.25.9 + go1.26.2). The new `KeepPrimaryPurls`
+  policy field carves a narrow exception for `pkg:golang/stdlib`;
+  module-path rows (`go.uber.org`, `k8s.io`, `gopkg.in`,
+  `cel.dev`, `modernc.org`, `go.opentelemetry.io`,
+  `go.etcd.io`, `sigs.k8s.io`, `knative.dev`, `src-d`) stay
+  evidence-only — verified 10/10 NVD-zero in run #3. Components
+  on the exception path stamp `astinus:cpe:exception-applied =
+  keep-primary` + `astinus:cpe:exception-rationale` for audit
+  traceability. (ADR-0047, S5 Task 0.)
+
 ### Added
 
 - **Sprint 4 acceptance suite (`test/acceptance/sprint4/`).**
