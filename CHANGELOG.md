@@ -11,6 +11,22 @@ public CLI / output surface.
 
 ## Unreleased
 
+### Changed
+
+- **`astinus:layer:digest` now emits the OCI rootfs `diff_id`**
+  (sha256 of the uncompressed tar — the canonical layer
+  identifier per the OCI image-spec). Previous builds emitted a
+  third hash — neither rootfs diff_id nor manifest compressed
+  digest — that downstream consumers could not map to any layer
+  in the image manifest. Run #3 benchmark measured sample
+  accuracy 0/20 against ground-truth diff_ids; Sprint 5 Task 5
+  pins the post-fix metric ≥ 17/20. Added
+  `astinus:layer:compressed-digest` as a supplementary property
+  carrying the manifest blob hash for tools that need it. The
+  typed `model.LayerInfo` struct gains `LayerCompressedDigest`
+  alongside the existing `LayerDigest`. CycloneDX + SPDX
+  mappers round-trip both fields. (ADR-0049, S5 Task 2.)
+
 ### Fixed
 
 - **Eliminated remaining ~60 `pkg:generic/<sonamename>` phantom

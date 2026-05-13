@@ -114,11 +114,30 @@ type Component struct {
 
 // LayerInfo is the layer-level provenance of a Component, populated by
 // the attribution enricher.
+//
+// S5 Task 2 split the single layer-digest field into the OCI
+// image-spec's canonical pair: LayerDigest carries the rootfs
+// `diff_id` (sha256 of the uncompressed tar — stable across
+// compression scheme changes and across docker save / crane pull /
+// skopeo copy), and LayerCompressedDigest carries the registry
+// blob hash (`manifest.layers[].digest`) when available. Pre-S5
+// LayerDigest carried the compressed digest under a misleading
+// name; run #3 benchmark caught the resulting 0/20 sample-accuracy
+// against ground-truth diff_ids.
 type LayerInfo struct {
-	LayerDigest    string
-	LayerIndex     int
-	DockerfileLine string
-	AddedBy        string
+	// LayerDigest is the OCI rootfs diff_id (uncompressed tar
+	// sha256). The canonical OCI layer identifier; SBOM consumers
+	// map this 1:1 against the image config's `rootfs.diff_ids`
+	// array.
+	LayerDigest string
+	// LayerCompressedDigest is the registry-blob hash from the
+	// manifest (`manifest.layers[i].digest`). Empty when the
+	// backend can't produce it (some OCI-layout / daemon paths)
+	// or when the layer descriptor lookup failed. S5 Task 2.
+	LayerCompressedDigest string
+	LayerIndex            int
+	DockerfileLine        string
+	AddedBy               string
 }
 
 // Origin classifies a Component as belonging to the base image, the

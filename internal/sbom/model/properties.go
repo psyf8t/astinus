@@ -24,6 +24,10 @@ const (
 	PropertyLayerIndex          = "astinus:layer:index"
 	PropertyLayerDockerfileLine = "astinus:layer:dockerfile-line"
 	PropertyLayerAddedBy        = "astinus:layer:added-by"
+	// PropertyLayerCompressedDigest carries the registry-blob hash
+	// (`manifest.layers[i].digest`) supplementing the canonical
+	// rootfs.diff_id in PropertyLayerDigest. S5 Task 2.
+	PropertyLayerCompressedDigest = "astinus:layer:compressed-digest"
 	// PropertyLayerSource records which discovery path produced the
 	// layer attribution: a filesystem-walk last-touch lookup
 	// ("filemap-last-touch") or a translated Syft location

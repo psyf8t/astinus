@@ -880,9 +880,10 @@ func buildBaseComponent(fe layer.FileEntry, cls Result, sha256Short string, hash
 			Locations: []model.EvidenceLocation{{Path: fe.Path}},
 		},
 		LayerInfo: &model.LayerInfo{
-			LayerDigest: fe.Layer.Digest,
-			LayerIndex:  fe.Layer.Index,
-			AddedBy:     fe.Layer.CreatedBy,
+			LayerDigest:           fe.Layer.DiffID,
+			LayerCompressedDigest: fe.Layer.CompressedDigest,
+			LayerIndex:            fe.Layer.Index,
+			AddedBy:               fe.Layer.CreatedBy,
 		},
 		Properties: map[string]string{
 			"astinus:untracked:category": categoryString(cls.Category),
@@ -1000,9 +1001,10 @@ func (e *Enricher) observedTooLargeResult(fe layer.FileEntry) processResult {
 			Locations: []model.EvidenceLocation{{Path: fe.Path}},
 		},
 		LayerInfo: &model.LayerInfo{
-			LayerDigest: fe.Layer.Digest,
-			LayerIndex:  fe.Layer.Index,
-			AddedBy:     fe.Layer.CreatedBy,
+			LayerDigest:           fe.Layer.DiffID,
+			LayerCompressedDigest: fe.Layer.CompressedDigest,
+			LayerIndex:            fe.Layer.Index,
+			AddedBy:               fe.Layer.CreatedBy,
 		},
 		Properties: map[string]string{
 			"astinus:untracked:category":          "unknown",

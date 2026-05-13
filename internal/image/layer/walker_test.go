@@ -240,3 +240,47 @@ func TestFileMapNilSafe(t *testing.T) {
 		t.Error("nil FileMap.Len should be 0")
 	}
 }
+
+// ─── S5 Task 2: DiffID + CompressedDigest ─────────────────────────────
+
+// TestWalkPopulatesDiffIDAndCompressedDigest — S5 Task 2 split the
+// single Info.Digest field into DiffID (rootfs.diff_ids — canonical
+// OCI layer identifier) and CompressedDigest (manifest layer blob
+// hash). For a typical in-memory go-containerregistry image both
+// must be populated, distinct, and stable across re-runs.
+func TestWalkPopulatesDiffIDAndCompressedDigest(t *testing.T) {
+	img := buildImage(t, []layerSpec{
+		{files: map[string]string{"usr/bin/foo": "v1"}},
+		{files: map[string]string{"opt/app/jq": "binary"}},
+	})
+	m, err := Walk(context.Background(), img)
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	layers := m.Layers()
+	if len(layers) != 2 {
+		t.Fatalf("Layers count = %d, want 2", len(layers))
+	}
+	for i, info := range layers {
+		if info.DiffID == "" {
+			t.Errorf("layer %d DiffID empty", i)
+		}
+		if info.CompressedDigest == "" {
+			t.Errorf("layer %d CompressedDigest empty", i)
+		}
+		// DiffID and CompressedDigest must differ — they're sha256
+		// of uncompressed vs compressed payloads.
+		if info.DiffID == info.CompressedDigest {
+			t.Errorf("layer %d DiffID == CompressedDigest = %q — pre-S5 single-field regression",
+				i, info.DiffID)
+		}
+		if info.Index != i {
+			t.Errorf("layer %d Index = %d, want %d", i, info.Index, i)
+		}
+	}
+	// DiffID across layers must be unique (different content).
+	if layers[0].DiffID == layers[1].DiffID {
+		t.Errorf("two layers shared DiffID %q — content collision unlikely with random fixtures",
+			layers[0].DiffID)
+	}
+}

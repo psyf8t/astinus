@@ -40,14 +40,35 @@ type FileMap struct {
 }
 
 // Info describes one layer in the order it was applied.
+//
+// S5 Task 2 split the single `Digest` field into the canonical
+// pair the OCI image-spec defines: `DiffID` (sha256 of the
+// uncompressed tar — `rootfs.diff_ids` entry in the image
+// config) and `CompressedDigest` (sha256 of the compressed blob
+// — `manifest.layers[].digest`). The two values differ; the
+// pre-S5 code only emitted CompressedDigest and labelled it as
+// `astinus:layer:digest`, which downstream consumers couldn't
+// map to a manifest layer because run #3 benchmark showed
+// 0/20 sample accuracy against the GT's diff_id.
 type Info struct {
 	// Index is the 0-based layer index (bottom layer is 0).
 	Index int
 
-	// Digest is the layer's compressed digest from the manifest
-	// ("sha256:..."). Empty when go-containerregistry could not
-	// surface it (rare; logged but not fatal).
-	Digest string
+	// DiffID is the sha256 of the uncompressed tar — the
+	// canonical layer identifier per the OCI image-spec
+	// (`rootfs.diff_ids[i]`). Stable across compression scheme
+	// changes (gzip ↔ zstd) and across `docker save` /
+	// `crane pull` / `skopeo copy`. Empty when
+	// go-containerregistry could not surface it (rare; the
+	// uncompressed Reader has to be drained).
+	DiffID string
+
+	// CompressedDigest is the sha256 of the compressed blob as
+	// stored in the OCI manifest (`manifest.layers[].digest`).
+	// Useful for registry-blob lookups but NOT canonical across
+	// re-compressions. Empty when the backend can't provide it
+	// (some OCI-layout / daemon paths).
+	CompressedDigest string
 
 	// CreatedBy is the Dockerfile instruction that produced this
 	// layer, taken from the image config's history. Empty when
@@ -138,6 +159,14 @@ func Walk(ctx context.Context, img v1.Image) (*FileMap, error) {
 // image config. The two lists differ in length when the image has
 // "empty layer" history records (ENV/CMD/etc.) — we step the history
 // cursor only on non-empty entries.
+//
+// S5 Task 2: populates DiffID (canonical OCI layer identifier from
+// `rootfs.diff_ids`) AND CompressedDigest (registry blob hash from
+// `manifest.layers[].digest`). Pre-S5 code only stored
+// CompressedDigest, mislabeled as `astinus:layer:digest` for SBOM
+// consumers — run #3 benchmark showed 0/20 sample-accuracy match
+// against the ground truth's diff_id because the two are distinct
+// sha256 values for the same layer.
 func buildInfos(img v1.Image, layers []v1.Layer) ([]Info, error) {
 	cfg, err := img.ConfigFile()
 	if err != nil {
@@ -146,9 +175,19 @@ func buildInfos(img v1.Image, layers []v1.Layer) ([]Info, error) {
 
 	infos := make([]Info, len(layers))
 	for i, lyr := range layers {
-		d, err := lyr.Digest()
-		if err == nil {
-			infos[i].Digest = d.String()
+		// Compressed digest — the manifest blob hash. Cheap;
+		// go-containerregistry caches it on the Layer.
+		if d, err := lyr.Digest(); err == nil {
+			infos[i].CompressedDigest = d.String()
+		}
+		// DiffID — the canonical OCI identifier. Read from
+		// rootfs.diff_ids when available (every image config
+		// carries it), fall back to lyr.DiffID() when the
+		// config-side ordering doesn't line up.
+		if cfg != nil && i < len(cfg.RootFS.DiffIDs) {
+			infos[i].DiffID = cfg.RootFS.DiffIDs[i].String()
+		} else if d, err := lyr.DiffID(); err == nil {
+			infos[i].DiffID = d.String()
 		}
 		infos[i].Index = i
 	}

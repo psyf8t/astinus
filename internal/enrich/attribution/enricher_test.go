@@ -53,6 +53,26 @@ func TestAttributionStampsLayerInfo(t *testing.T) {
 	if sbom.Components[1].LayerInfo == nil || sbom.Components[1].LayerInfo.LayerIndex != 1 {
 		t.Errorf("jq layer = %+v, want layer 1", sbom.Components[1].LayerInfo)
 	}
+	// S5 Task 2: LayerDigest must be the rootfs diff_id (uncompressed
+	// tar sha256), and LayerCompressedDigest must hold the registry
+	// blob hash. Pre-S5 the field carried compressed digest under a
+	// misleading name.
+	for i := range sbom.Components {
+		li := sbom.Components[i].LayerInfo
+		if li == nil {
+			continue
+		}
+		if li.LayerDigest == "" {
+			t.Errorf("component %d LayerDigest empty (DiffID)", i)
+		}
+		if li.LayerCompressedDigest == "" {
+			t.Errorf("component %d LayerCompressedDigest empty", i)
+		}
+		if li.LayerDigest == li.LayerCompressedDigest {
+			t.Errorf("component %d LayerDigest == LayerCompressedDigest = %q — S5-T2 split regression",
+				i, li.LayerDigest)
+		}
+	}
 }
 
 func TestAttributionLatestLayerWins(t *testing.T) {

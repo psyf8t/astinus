@@ -337,6 +337,11 @@ func hydrateAstinusFields(c *model.Component) {
 		delete(c.Properties, model.PropertyLayerDigest)
 		hasLayer = true
 	}
+	if v, ok := c.Properties[model.PropertyLayerCompressedDigest]; ok {
+		li.LayerCompressedDigest = v
+		delete(c.Properties, model.PropertyLayerCompressedDigest)
+		hasLayer = true
+	}
 	if v, ok := c.Properties[model.PropertyLayerIndex]; ok {
 		if n, err := strconv.Atoi(v); err == nil {
 			li.LayerIndex = n
@@ -382,6 +387,9 @@ func astinusProperties(c *model.Component) map[string]string {
 		li := c.LayerInfo
 		if li.LayerDigest != "" {
 			out[model.PropertyLayerDigest] = li.LayerDigest
+		}
+		if li.LayerCompressedDigest != "" {
+			out[model.PropertyLayerCompressedDigest] = li.LayerCompressedDigest
 		}
 		out[model.PropertyLayerIndex] = strconv.Itoa(li.LayerIndex)
 		if li.DockerfileLine != "" {

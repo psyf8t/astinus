@@ -213,12 +213,17 @@ func (s *stamper) lookupPath(p string) (layer.Info, bool) {
 // lookupLayerDigest scans the FileMap's layer descriptors for a
 // match against digest. Linear; the layer count is small (<32 for
 // production images).
+//
+// S5 Task 2: matches against both DiffID and CompressedDigest so
+// Syft's `syft:location:N:layerID` (whichever shape Syft uses on
+// the given image — DiffID is the typical case, CompressedDigest
+// happens on daemon backends) finds the right layer.
 func (s *stamper) lookupLayerDigest(digest string) (layer.Info, bool) {
 	if s.fm == nil || digest == "" {
 		return layer.Info{}, false
 	}
 	for _, info := range s.fm.Layers() {
-		if info.Digest == digest {
+		if info.DiffID == digest || info.CompressedDigest == digest {
 			return info, true
 		}
 	}
@@ -227,10 +232,11 @@ func (s *stamper) lookupLayerDigest(digest string) (layer.Info, bool) {
 
 func (s *stamper) stampFromInfo(c *model.Component, info layer.Info, source string) {
 	c.LayerInfo = &model.LayerInfo{
-		LayerDigest:    info.Digest,
-		LayerIndex:     info.Index,
-		DockerfileLine: "", // not derivable from history alone
-		AddedBy:        info.CreatedBy,
+		LayerDigest:           info.DiffID,
+		LayerCompressedDigest: info.CompressedDigest,
+		LayerIndex:            info.Index,
+		DockerfileLine:        "", // not derivable from history alone
+		AddedBy:               info.CreatedBy,
 	}
 	ensureProp(c, model.PropertyLayerSource, source)
 }
