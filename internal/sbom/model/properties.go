@@ -46,8 +46,16 @@ const (
 
 	// CPE-mode metadata stamped onto sbom.Metadata.Properties so
 	// downstream consumers can tell apart full-online enrichment
-	// from a degraded-auto run. S4 Task 4.
-	PropertyCPEMode           = "astinus:cpe:mode"
+	// from a degraded-auto run. S4 Task 4 / S5 Task 4.
+	PropertyCPEMode = "astinus:cpe:mode"
+	// PropertyCPESourcesUsed is a comma-separated list of CPE
+	// sources that ran during enrichment. Companion to
+	// PropertyCPESourcesSkipped. S5 Task 4.
+	PropertyCPESourcesUsed = "astinus:cpe:sources-used"
+	// PropertyCPESourcesSkipped is a comma-separated list of CPE
+	// sources skipped (each entry is `<source>:<reason>` per the
+	// S5 Task 4 finalised format). Empty when every recognised
+	// source ran.
 	PropertyCPESourcesSkipped = "astinus:cpe:sources-skipped"
 
 	// Top-level metadata stamp emitted on every Astinus-touched SBOM.

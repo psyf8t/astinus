@@ -120,22 +120,30 @@ func TestNVDFailFastAdviceContainsActionableHints(t *testing.T) {
 
 // TestStampCPEModeMetadata covers the SBOM-metadata stamp helper
 // that lets downstream SBOM consumers tell apart full-online runs
-// from auto-degraded runs (e.g. NVD skipped because no API key).
-// S4 Task 4.
+// from auto-degraded / offline / disabled runs. S4 Task 4 +
+// S5 Task 4 finalised the contract: mode + sources-used +
+// sources-skipped (with `<source>:<reason>` for the latter).
 func TestStampCPEModeMetadata(t *testing.T) {
 	t.Run("auto with skipped sources", func(t *testing.T) {
 		sbom := &model.SBOM{}
 		opts := &enrichOptions{
-			cpeMode:           "auto",
-			cpeModeEffective:  "auto",
-			cpeSkippedSources: []string{"online-nvd"},
+			cpeMode:          "auto",
+			cpeModeEffective: "auto",
+			cpeUsedSources: []string{
+				"pattern-matcher", "clearly-defined", "heuristic",
+			},
+			cpeSkippedSources: []string{"online-nvd:no-NVD_API_KEY"},
 		}
 		stampCPEModeMetadata(sbom, opts)
 		if got := sbom.Metadata.Properties[model.PropertyCPEMode]; got != "auto" {
 			t.Errorf("PropertyCPEMode = %q, want auto", got)
 		}
-		if got := sbom.Metadata.Properties[model.PropertyCPESourcesSkipped]; got != "online-nvd" {
-			t.Errorf("PropertyCPESourcesSkipped = %q, want online-nvd", got)
+		want := "pattern-matcher,clearly-defined,heuristic"
+		if got := sbom.Metadata.Properties[model.PropertyCPESourcesUsed]; got != want {
+			t.Errorf("PropertyCPESourcesUsed = %q, want %q", got, want)
+		}
+		if got := sbom.Metadata.Properties[model.PropertyCPESourcesSkipped]; got != "online-nvd:no-NVD_API_KEY" {
+			t.Errorf("PropertyCPESourcesSkipped = %q, want online-nvd:no-NVD_API_KEY", got)
 		}
 	})
 	t.Run("hybrid full-online", func(t *testing.T) {
@@ -143,6 +151,9 @@ func TestStampCPEModeMetadata(t *testing.T) {
 		opts := &enrichOptions{
 			cpeMode:          "hybrid",
 			cpeModeEffective: "hybrid",
+			cpeUsedSources: []string{
+				"pattern-matcher", "online-nvd", "clearly-defined", "heuristic",
+			},
 		}
 		stampCPEModeMetadata(sbom, opts)
 		if got := sbom.Metadata.Properties[model.PropertyCPEMode]; got != "hybrid" {
@@ -150,6 +161,31 @@ func TestStampCPEModeMetadata(t *testing.T) {
 		}
 		if _, present := sbom.Metadata.Properties[model.PropertyCPESourcesSkipped]; present {
 			t.Errorf("PropertyCPESourcesSkipped should be absent when no skip happened")
+		}
+		want := "pattern-matcher,online-nvd,clearly-defined,heuristic"
+		if got := sbom.Metadata.Properties[model.PropertyCPESourcesUsed]; got != want {
+			t.Errorf("PropertyCPESourcesUsed = %q, want %q", got, want)
+		}
+	})
+	t.Run("offline records online sources as skipped", func(t *testing.T) {
+		sbom := &model.SBOM{}
+		opts := &enrichOptions{
+			cpeMode:          "offline",
+			cpeModeEffective: "offline",
+			cpeUsedSources:   []string{"pattern-matcher", "heuristic"},
+			cpeSkippedSources: []string{
+				"online-nvd:offline-mode",
+				"clearly-defined:offline-mode",
+			},
+		}
+		stampCPEModeMetadata(sbom, opts)
+		if got := sbom.Metadata.Properties[model.PropertyCPEMode]; got != "offline" {
+			t.Errorf("PropertyCPEMode = %q, want offline", got)
+		}
+		// Reason-encoded skipped entries surface the offline mode.
+		skipped := sbom.Metadata.Properties[model.PropertyCPESourcesSkipped]
+		if !strings.Contains(skipped, "online-nvd:offline-mode") {
+			t.Errorf("PropertyCPESourcesSkipped = %q, want online-nvd:offline-mode entry", skipped)
 		}
 	})
 	t.Run("nil opts is no-op", func(t *testing.T) {

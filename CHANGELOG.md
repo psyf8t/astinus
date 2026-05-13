@@ -11,6 +11,26 @@ public CLI / output surface.
 
 ## Unreleased
 
+### Changed
+
+- **`--cpe-mode` contract finalised + observability widened.**
+  The three modes (`offline` / `auto` / `hybrid`, with `online`
+  as a deprecated alias for `hybrid`) get a full
+  four-clause help-text rewrite explaining what each does and
+  what fails how. New `astinus:cpe:sources-used` SBOM metadata
+  property carries the comma-separated list of CPE sources that
+  actually ran (`pattern-matcher`, `local-dict`, `online-nvd`,
+  `clearly-defined`, `heuristic`). The existing
+  `astinus:cpe:sources-skipped` property now uses
+  `<source>:<reason>` per entry (e.g.
+  `online-nvd:no-NVD_API_KEY`, `online-nvd:offline-mode`,
+  `clearly-defined:offline-mode`) so SBOM consumers can tell
+  apart graceful-degradation skips from offline-mode
+  configuration choices without parsing logs. The
+  S4-Task-4-introduced bare format (`online-nvd`) is gone —
+  tools that pattern-matched on the exact token need to adapt
+  to the reason-encoded shape. (ADR-0051, S5 Task 4.)
+
 ### Fixed
 
 - **Go module versions resolve to `debug/buildinfo`, not

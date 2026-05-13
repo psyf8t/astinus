@@ -52,7 +52,10 @@ func TestBuildCPEEnricherSkipsNVDInLargeHybridWorkload(t *testing.T) {
 			t.Errorf("expected log to mention %q, got:\n%s", want, out)
 		}
 	}
-	wantSkipped := []string{"online-nvd"}
+	// S5 Task 4 finalised the format: entries are
+	// `<source>:<reason>` so SBOM consumers can distinguish
+	// graceful-skip from offline-mode from configuration choices.
+	wantSkipped := []string{"online-nvd:no-NVD_API_KEY"}
 	if !equalStringSlice(opts.cpeSkippedSources, wantSkipped) {
 		t.Errorf("opts.cpeSkippedSources = %v, want %v",
 			opts.cpeSkippedSources, wantSkipped)

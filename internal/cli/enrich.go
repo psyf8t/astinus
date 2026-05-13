@@ -118,10 +118,16 @@ type enrichOptions struct {
 	// actually ran.
 	cpeModeEffective string
 	// cpeSkippedSources lists the online CPE sources the
-	// auto-mode degradation dropped from the chain (today: only
-	// "online-nvd" under the rate-limit predicate). Stamped onto
+	// auto-mode degradation dropped from the chain. Entries are
+	// formatted `<source>:<reason>` (e.g. `online-nvd:no-NVD_API_KEY`)
+	// since S5 Task 4 finalised the format. Stamped onto
 	// sbom.Metadata.
 	cpeSkippedSources []string
+	// cpeUsedSources is the companion to cpeSkippedSources —
+	// every CPE source that actually ran. Lets operators see
+	// which corner of the contract fired without parsing logs.
+	// S5 Task 4.
+	cpeUsedSources []string
 	// nvdAPIKey is the NVD API key (env: NVD_API_KEY).
 	// PRSD-Task-5.
 	nvdAPIKey string
@@ -270,13 +276,22 @@ add the others.`,
 	flags.BoolVar(&opts.noCluster, "no-cluster", false,
 		"Disable filesystem-aware clustering — record every file as a separate untracked component (debug)")
 	flags.StringVar(&opts.cpeMode, "cpe-mode", "auto",
-		"CPE resolver mode. 'auto' (default) tries every reachable "+
-			"source and WARNs on unavailable ones; 'hybrid' (strict) "+
-			"exits 60 when any expected online source is unavailable "+
-			"(typically NVD without an API key on a workload that "+
-			"would exceed the anonymous rate limit); 'offline' uses "+
-			"only bundled / on-disk catalogues. 'online' is a "+
-			"deprecated alias for 'hybrid'.")
+		"CPE resolver mode (S5 Task 4 final contract).\n"+
+			"  offline — bundled data only; guaranteed zero network calls.\n"+
+			"  auto    — best effort: try every reachable source, skip the "+
+			"ones that are unavailable with a WARN log per skip; never fails. "+
+			"NVD online is attempted only when NVD_API_KEY is set and the "+
+			"workload doesn't exceed the anonymous rate-limit threshold.\n"+
+			"  hybrid  — strict: every recognised online source must be "+
+			"available; exits 60 (ExitCPESourceUnavailable) when any is "+
+			"missing (typically NVD without an API key on a workload that "+
+			"would exceed the anonymous rate limit).\n"+
+			"  online  — deprecated alias for 'hybrid' (DeprecationWarning "+
+			"logged; removed in v1.0.0).\n"+
+			"Default: auto. The effective mode + the lists of sources "+
+			"actually used / skipped (with reasons) are stamped on the "+
+			"output SBOM as astinus:cpe:mode, astinus:cpe:sources-used, "+
+			"astinus:cpe:sources-skipped.")
 	flags.StringVar(&opts.nvdAPIKey, "nvd-api-key", "",
 		"NVD API key (env: NVD_API_KEY). Higher rate limit (50 req / 30s vs 5 req / 30s)")
 	flags.StringVar(&opts.nvdAPIURL, "nvd-api-url", "",
@@ -1024,6 +1039,7 @@ func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Lo
 	srcs := []cpesources.Source{
 		cpesources.NewPatternMatcher(),
 	}
+	usedSources := []string{"pattern-matcher"}
 	if opts.offlineDB != "" {
 		local := cpe.NewLocalDictionaryResolver()
 		local.SetLogger(logger)
@@ -1032,6 +1048,7 @@ func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Lo
 		}
 		if s := cpesources.NewLocalDict(local); s != nil {
 			srcs = append(srcs, s)
+			usedSources = append(usedSources, "local-dict")
 		}
 	}
 	nvdSkipped := false
@@ -1050,10 +1067,11 @@ func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Lo
 		}
 		// Graceful (auto): skip the source up-front and continue.
 		// Matches the pre-S4 hybrid behaviour, but now lives behind
-		// an explicit mode opt-in. ADR-0028 + ADR-0043.
+		// an explicit mode opt-in. ADR-0028 + ADR-0043 + S5 Task 4
+		// (reason-encoded skip format).
 		if shouldSkipAnonymousNVDInHybrid(mode, nvdKey, componentCount) {
 			nvdSkipped = true
-			skippedSources = append(skippedSources, "online-nvd")
+			skippedSources = append(skippedSources, "online-nvd:no-NVD_API_KEY")
 			logger.Warn(telemetry.EventCPENVDSkipped,
 				"reason", "auto + no NVD_API_KEY + workload above safe threshold",
 				"components", componentCount,
@@ -1068,10 +1086,20 @@ func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Lo
 				nvdSrc = nvdSrc.WithBaseURL(opts.nvdAPIURL)
 			}
 			srcs = append(srcs, nvdSrc)
+			usedSources = append(usedSources, "online-nvd")
 		}
 		srcs = append(srcs, cpesources.NewClearlyDefined(client))
+		usedSources = append(usedSources, "clearly-defined")
+	} else {
+		// Offline mode: the online sources are skipped by design
+		// (not a degradation). Record them as skipped with the
+		// `offline` reason so SBOM consumers see a uniform shape.
+		skippedSources = append(skippedSources,
+			"online-nvd:offline-mode",
+			"clearly-defined:offline-mode")
 	}
 	srcs = append(srcs, cpesources.NewHeuristic())
+	usedSources = append(usedSources, "heuristic")
 
 	resolver := cpesources.NewMultiSource(cpesources.Options{
 		Mode:    mode,
@@ -1083,9 +1111,11 @@ func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Lo
 		"sources", len(resolver.Sources()),
 		"nvd_authenticated", opts.nvdAPIKey != "" || os.Getenv("NVD_API_KEY") != "",
 		"nvd_skipped", nvdSkipped,
+		"used_sources", usedSources,
 		"skipped_sources", skippedSources,
 		"include_rejected", opts.includeRejectedCPE)
 	opts.cpeModeEffective = string(mode)
+	opts.cpeUsedSources = usedSources
 	opts.cpeSkippedSources = skippedSources
 	return cpe.NewWithResolver(resolver).WithIncludeRejected(opts.includeRejectedCPE), nil
 }

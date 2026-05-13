@@ -111,11 +111,15 @@ func nvdSkipAdvice(componentCount int) string {
 		estimateAnonymousNVDMinutes(componentCount), componentCount)
 }
 
-// stampCPEModeMetadata records the effective CPE mode and the list
-// of skipped online sources on sbom.Metadata.Properties. Idempotent:
-// re-stamping the same SBOM overwrites with the latest run's values
-// (matches the convention used by stampMetadata in the pipeline).
-// S4 Task 4.
+// stampCPEModeMetadata records the effective CPE mode plus the
+// active/skipped source lists on sbom.Metadata.Properties.
+// Idempotent: re-stamping the same SBOM overwrites with the latest
+// run's values (matches the convention used by stampMetadata in the
+// pipeline). S4 Task 4 introduced the surface;
+// S5 Task 4 finalised the contract — sources-used + reason-encoded
+// sources-skipped values let downstream consumers tell apart
+// full-online enrichment, graceful-degraded auto runs, offline runs,
+// and partial / disabled configurations without parsing logs.
 func stampCPEModeMetadata(sbom *model.SBOM, opts *enrichOptions) {
 	if sbom == nil || opts == nil {
 		return
@@ -132,6 +136,12 @@ func stampCPEModeMetadata(sbom *model.SBOM, opts *enrichOptions) {
 	}
 	if mode != "" {
 		sbom.Metadata.Properties[model.PropertyCPEMode] = mode
+	}
+	if len(opts.cpeUsedSources) > 0 {
+		sbom.Metadata.Properties[model.PropertyCPESourcesUsed] =
+			strings.Join(opts.cpeUsedSources, ",")
+	} else {
+		delete(sbom.Metadata.Properties, model.PropertyCPESourcesUsed)
 	}
 	if len(opts.cpeSkippedSources) > 0 {
 		sbom.Metadata.Properties[model.PropertyCPESourcesSkipped] =
