@@ -185,6 +185,15 @@ public CLI / output surface.
   chains (BundledResolver / Chain) flow through unchanged.
   See ADR-0057 (amended).
 
+- **VEX support verified on `87bff5c` baseline (Sprint 8 Task 3).**
+  The Sprint 8 task spec is path-renamed-only vs Sprint 6 / 7
+  Task 6. The implementation (internal/vex/ parser + applyVEXSuppression
+  in CLI + ADR-0063) shipped under S6-T6 satisfies the Sprint 8
+  DoD unchanged. `go test ./internal/vex/... ./internal/cli/...`
+  GREEN; acceptance gates `TestS6T6_VEXSuppressesCVEFinding` +
+  `TestS6Stage14_VEX_Policy_License_ComposeCleanly` GREEN. No
+  code change.
+
 - **CPE alt-candidate preservation verified on `87bff5c` baseline.**
   Sprint 8 README's run-3 benchmark repeated the C-nginx
   `ssl_client` CVE-2025-60876 TP regression observation —
