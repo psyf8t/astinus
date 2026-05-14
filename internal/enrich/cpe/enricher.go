@@ -485,12 +485,21 @@ type enrichStats struct {
 // ConfidenceMedium so they remain primary in the absence of a better
 // resolver match; invalid entries score ConfidenceReject so Classify
 // surfaces them with an explanatory RejectedReason.
+//
+// S7 Task 1: input strings carrying URL-percent-encoded attribute
+// slots (`%3A`, `%2B`, …) — a non-spec shape some upstream SBOM
+// tooling emits — are normalised to the spec-correct backslash-
+// escape via NormalizeCPEEncoding BEFORE classification. Astinus's
+// own output already uses backslash-escape (S6 Task 1 / ADR-0058);
+// the ingest-side normalisation ensures Syft / Trivy / hand-edited
+// inputs that drift from spec land in the canonical shape.
 func candidatesFromExistingCPEs(cpes []string) []Candidate {
 	if len(cpes) == 0 {
 		return nil
 	}
 	out := make([]Candidate, 0, len(cpes))
 	for _, s := range cpes {
+		s = NormalizeCPEEncoding(s)
 		if IsValidCPE(s) {
 			out = append(out, Candidate{
 				CPE:        s,

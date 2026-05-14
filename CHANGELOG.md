@@ -165,6 +165,28 @@ public CLI / output surface.
 
 ### Fixed
 
+- **Input-side CPE encoding normalisation.** Sprint 7 run-2
+  benchmark reported 27 URL-percent violations on D-postgres
+  and 2 on B-airflow despite Sprint 6 Task 1's backslash-escape
+  fix being in place. Root cause: Astinus's `cpe.Build` +
+  `CPEv23.String` correctly emit backslash-escape for
+  self-generated CPEs, but `candidatesFromExistingCPEs` read
+  inherited CPE strings from input SBOMs verbatim — when an
+  upstream tool (Syft/Trivy wrapper, hand-edited fixture)
+  emitted `%3A` / `%2B`, the malformed shape rode through to
+  the output. New `NormalizeCPEEncoding(cpe string) string`
+  helper decodes the recognised URL-percent triplets in each
+  attribute slot and re-routes the slot through
+  `EscapeCPE23Attribute` to produce the spec-correct backslash
+  shape. Runs at ingest time in `candidatesFromExistingCPEs`
+  so the rest of the CPE machinery sees the canonical form.
+  Recognises the operator-facing common subset (%3A, %2B,
+  %40, %5C, %20, %2F, %3F, %3D, %26, %23, %25, %5E, %7E, %3B,
+  %2C, plus paren/bracket/brace + the rest of the CPE 2.3
+  special set); unknown triplets pass through unchanged so a
+  legitimate `%99` in a slot isn't mangled. See ADR-0058
+  (amended).
+
 - **CPE-source HTTP transport gains `ResponseHeaderTimeout`
   defense-in-depth.** Sprint 7 run-2 benchmark reported the
   Airflow `--cpe-mode auto` hang as unchanged despite Sprint 6
