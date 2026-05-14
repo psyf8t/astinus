@@ -165,6 +165,18 @@ public CLI / output surface.
 
 ### Fixed
 
+- **Sprint 7 close — acceptance suite verified against the
+  baseline.** Re-ran `go test -tags acceptance ./test/acceptance/
+  sprint4/... ./test/acceptance/sprint5/... ./test/acceptance/
+  sprint6/...` GREEN against the post-S7 baseline; 11 in-process
+  Sprint 6 gates continue to cover the S6 + S7 amended contracts.
+  4-image pinned-digest bundle (Grafana / Airflow / Nginx /
+  Postgres + ground-truth JSON + Grype-binary delta gates +
+  acceptance-sprint6.yml CI matrix workflow + update_fixtures/
+  update.go toolchain) remains deferred to Sprint 8 — same
+  trade-off Sprint 6 Task 9 (ADR-0066) made. See ADR-0066
+  (amended).
+
 - **Bundled hyper crate CPE mapping corrected.** Sprint 7
   run-2 flagged Astinus's first WORSE CPE-quality verdict
   across all benchmark runs: Syft baseline
