@@ -114,25 +114,30 @@ func UnescapeCPE23Attribute(s string) string {
 // helper restores the spec-correct form at ingest time so the
 // downstream CPE machinery + Astinus's own output stay consistent.
 //
-// Returns the input unchanged on:
+// Returns (input, false) on:
 //
 //   - Inputs that don't parse as CPE 2.3 (passthrough — let the
 //     validator reject if it cares).
 //   - Inputs whose slots carry no URL-percent triplets (no work
 //     needed; same string returned).
 //
+// Returns (normalised, true) when one or more attribute slots got
+// rewritten. The bool lets the caller count repair fires for
+// operator-facing metadata stamps (S8 Task 1 /
+// astinus:cpe:input-normalised-count).
+//
 // Decoding accepts the operator-facing common subset (%3A, %2B,
 // %40, %5C, %20, %2F, %3F, %3D, %26, %23, %25, %5E, %7E, %3B,
 // %2C) — anything else passes through unchanged so a Pre-S7 URI
 // with `%99` (not a CPE special) lands without mangling.
 // S7 Task 1 / ADR-0058 amendment.
-func NormalizeCPEEncoding(cpe string) string {
+func NormalizeCPEEncoding(cpe string) (string, bool) {
 	if !strings.Contains(cpe, "%") {
-		return cpe
+		return cpe, false
 	}
 	parts, ok := splitCPEv23(cpe)
 	if !ok {
-		return cpe
+		return cpe, false
 	}
 	changed := false
 	for i := 3; i < len(parts); i++ {
@@ -153,9 +158,9 @@ func NormalizeCPEEncoding(cpe string) string {
 		changed = true
 	}
 	if !changed {
-		return cpe
+		return cpe, false
 	}
-	return strings.Join(parts, ":")
+	return strings.Join(parts, ":"), true
 }
 
 // percentDecodeCPESlot performs a minimal URL-percent decode over

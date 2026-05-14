@@ -90,6 +90,12 @@ const (
 	PropertyCPETotalCapConfigured      = "astinus:cpe:total-cap-configured"
 	PropertyCPESourceTimeoutConfigured = "astinus:cpe:source-timeout-configured"
 	PropertyCPECallTimeoutConfigured   = "astinus:cpe:call-timeout-configured"
+	// PropertyCPEInputNormalisedCount counts the input CPEs the
+	// URL-percent → backslash-escape normaliser repaired during a
+	// single Enrich call (NIST IR 7695 §6.1.2.5). Always present on
+	// a completed run — `0` means no repair was needed, absent means
+	// the enricher never ran. S8 Task 1 / ADR-0058 amendment.
+	PropertyCPEInputNormalisedCount = "astinus:cpe:input-normalised-count"
 
 	// Top-level metadata stamp emitted on every Astinus-touched SBOM.
 	PropertyEnrichedBy      = "astinus:enriched-by"

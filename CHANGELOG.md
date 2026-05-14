@@ -185,6 +185,24 @@ public CLI / output surface.
   chains (BundledResolver / Chain) flow through unchanged.
   See ADR-0057 (amended).
 
+- **CPE input-normalisation count now stamps on SBOM metadata.**
+  S7-T1 added `NormalizeCPEEncoding` to repair URL-percent-encoded
+  CPE attribute slots (`%3A` → `\:`, `%2B` → `\+`) at ingest time,
+  but the SBOM offered no operator-facing signal that the repair
+  fired — run-3 multi-image benchmark on D-postgres normalised
+  every Debian-epoch CPE silently. New `astinus:cpe:input-normalised-count`
+  property records the per-run count; always present on a
+  completed Enrich call so `"0"` (the enricher ran, didn't need
+  repairs) is distinguishable from absence (the enricher never
+  ran). `NormalizeCPEEncoding` now returns `(string, bool)` —
+  the bool surfaces the per-call fire so the enricher's walker
+  can accumulate across components. `cpe.complete` slog line
+  gains a `cpes_normalised` field so operators triaging from
+  logs (not the SBOM) get the same signal. Purely additive — the
+  S7-T1 repair logic is byte-for-byte identical; the new property
+  joins the existing CPE-mode metadata family. See ADR-0058
+  (amended).
+
 - **Sprint 7 close — acceptance suite verified against the
   baseline.** Re-ran `go test -tags acceptance ./test/acceptance/
   sprint4/... ./test/acceptance/sprint5/... ./test/acceptance/

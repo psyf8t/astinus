@@ -36,8 +36,13 @@ func TestNormalizeCPEEncoding_DecodesAndReEscapes(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		if got := NormalizeCPEEncoding(c.in); got != c.want {
+		got, changed := NormalizeCPEEncoding(c.in)
+		if got != c.want {
 			t.Errorf("NormalizeCPEEncoding(%q) = %q, want %q", c.in, got, c.want)
+		}
+		wantChanged := c.in != c.want
+		if changed != wantChanged {
+			t.Errorf("NormalizeCPEEncoding(%q) changed=%v, want %v", c.in, changed, wantChanged)
 		}
 	}
 }
@@ -53,8 +58,12 @@ func TestNormalizeCPEEncoding_LeavesNonCPEAlone(t *testing.T) {
 		"some-string-with-%3A-in-it", // not CPE-shaped
 	}
 	for _, in := range cases {
-		if got := NormalizeCPEEncoding(in); got != in {
+		got, changed := NormalizeCPEEncoding(in)
+		if got != in {
 			t.Errorf("NormalizeCPEEncoding(%q) = %q, want passthrough", in, got)
+		}
+		if changed {
+			t.Errorf("NormalizeCPEEncoding(%q) changed=true, want false for passthrough", in)
 		}
 	}
 }
@@ -65,9 +74,12 @@ func TestNormalizeCPEEncoding_LeavesNonCPEAlone(t *testing.T) {
 // common case.
 func TestNormalizeCPEEncoding_FastPath(t *testing.T) {
 	in := `cpe:2.3:a:openssl:openssl:3.0.0:*:*:*:*:*:*:*`
-	got := NormalizeCPEEncoding(in)
+	got, changed := NormalizeCPEEncoding(in)
 	if got != in {
 		t.Errorf("fast path produced %q, want %q", got, in)
+	}
+	if changed {
+		t.Errorf("fast path reported changed=true, want false")
 	}
 }
 
@@ -104,7 +116,7 @@ func TestCandidatesFromExistingCPEs_NormalisesInput(t *testing.T) {
 	in := []string{
 		`cpe:2.3:a:libcap2:libcap2:1%3A2.75-10%2Bb8:*:*:*:*:*:*:*`,
 	}
-	got := candidatesFromExistingCPEs(in)
+	got, normalised := candidatesFromExistingCPEs(in)
 	if len(got) != 1 {
 		t.Fatalf("got %d candidates, want 1", len(got))
 	}
@@ -114,5 +126,8 @@ func TestCandidatesFromExistingCPEs_NormalisesInput(t *testing.T) {
 	}
 	if got[0].Confidence == ConfidenceReject {
 		t.Errorf("normalised input incorrectly rejected: %+v", got[0])
+	}
+	if normalised != 1 {
+		t.Errorf("normalised count = %d, want 1", normalised)
 	}
 }

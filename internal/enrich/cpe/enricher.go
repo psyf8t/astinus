@@ -204,7 +204,7 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 	capHit, strictErr := e.walkWithDeadline(ctx, sbom.Components, total, start, &stats)
 	elapsed := time.Since(start)
 
-	stampEnrichMetadata(sbom, capHit, elapsed, stats.examined, e.resolverStatuses())
+	stampEnrichMetadata(sbom, capHit, elapsed, stats.examined, stats.cpesNormalised, e.resolverStatuses())
 	perSrcTimeout, perCallTimeout := e.resolverTimeouts()
 	stampConfiguredTimeouts(sbom, e.totalCap, perSrcTimeout, perCallTimeout)
 
@@ -219,6 +219,7 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 		"purl_error", stats.purlError,
 		"alternatives_kept", stats.alternativesKept,
 		"rejected", stats.rejectedCount,
+		"cpes_normalised", stats.cpesNormalised,
 		"total_cap_hit", capHit,
 		"elapsed", elapsed,
 	)
@@ -327,7 +328,8 @@ func (w *componentWalker) enrichOneCtx(c *model.Component) {
 	if hadExisting {
 		w.stats.hadCPEAlready++
 	}
-	cands := candidatesFromExistingCPEs(c.CPEs)
+	cands, normalised := candidatesFromExistingCPEs(c.CPEs)
+	w.stats.cpesNormalised += normalised
 	if hadExisting {
 		w.stats.validated++
 	}
@@ -483,7 +485,12 @@ func stampConfiguredTimeouts(sbom *model.SBOM, totalCap, perSource, perCall time
 // stamps onto sbom.Metadata.Properties. Idempotent — overwriting on
 // re-enrich is intentional (latest run wins). Per-source statuses
 // are added under the `astinus:cpe:source-status:<name>` family.
-func stampEnrichMetadata(sbom *model.SBOM, capHit bool, elapsed time.Duration, processed int, statuses map[string]string) {
+//
+// S8-T1: also stamps `astinus:cpe:input-normalised-count` —
+// always present so operators can distinguish "no repair was
+// needed" from "we never ran the normaliser" (run-3 multi-image
+// hit 14 fires on the postgres profile alone).
+func stampEnrichMetadata(sbom *model.SBOM, capHit bool, elapsed time.Duration, processed, normalised int, statuses map[string]string) {
 	if sbom == nil {
 		return
 	}
@@ -497,6 +504,7 @@ func stampEnrichMetadata(sbom *model.SBOM, capHit bool, elapsed time.Duration, p
 	}
 	sbom.Metadata.Properties[model.PropertyCPEElapsedSeconds] = fmt.Sprintf("%.2f", elapsed.Seconds())
 	sbom.Metadata.Properties[model.PropertyCPEComponentsProcessed] = fmt.Sprintf("%d", processed)
+	sbom.Metadata.Properties[model.PropertyCPEInputNormalisedCount] = fmt.Sprintf("%d", normalised)
 
 	// Drop any stale per-source-status entries from a previous run
 	// before writing the new set.
@@ -523,6 +531,7 @@ type enrichStats struct {
 	purlError        int // PURL malformed
 	alternativesKept int // count of `astinus:cpe:alternative:N` properties written
 	rejectedCount    int // count of candidates classified as rejected
+	cpesNormalised   int // S8-T1: count of input CPEs the URL-percent → backslash-escape normaliser repaired
 }
 
 // candidatesFromExistingCPEs converts CPE strings already on a
@@ -538,13 +547,18 @@ type enrichStats struct {
 // own output already uses backslash-escape (S6 Task 1 / ADR-0058);
 // the ingest-side normalisation ensures Syft / Trivy / hand-edited
 // inputs that drift from spec land in the canonical shape.
-func candidatesFromExistingCPEs(cpes []string) []Candidate {
+func candidatesFromExistingCPEs(cpes []string) ([]Candidate, int) {
 	if len(cpes) == 0 {
-		return nil
+		return nil, 0
 	}
 	out := make([]Candidate, 0, len(cpes))
+	normalised := 0
 	for _, s := range cpes {
-		s = NormalizeCPEEncoding(s)
+		normalisedS, changed := NormalizeCPEEncoding(s)
+		if changed {
+			normalised++
+			s = normalisedS
+		}
 		if IsValidCPE(s) {
 			out = append(out, Candidate{
 				CPE:        s,
@@ -565,7 +579,7 @@ func candidatesFromExistingCPEs(cpes []string) []Candidate {
 			RejectedReason: "input CPE failed CPE 2.3 syntax validation",
 		})
 	}
-	return out
+	return out, normalised
 }
 
 // writeResults runs Classify over cands and projects the result onto
