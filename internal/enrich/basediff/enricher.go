@@ -256,9 +256,27 @@ type contentStats struct {
 //
 // LayerInfo == nil is fine — content classification doesn't need
 // layer indices, only file paths and hashes.
+//
+// S7 Task 2: apk components stamped by the apk-earliest path
+// (ADR-0059) often have ONLY `/lib/apk/db/installed` as their
+// `syft:location:N:path` — Syft's apk cataloger doesn't always
+// re-stamp the binary path. After the S6-T2 path-filter strips
+// the DB path (it's metadata, not the artifact), the path set is
+// empty and the content strategy returned OriginUnknown — losing
+// the layer-index information apk-earliest already resolved.
+// Restore the lost coverage via a LayerIndex-based fallback when
+// the component carries `astinus:layer:source = apk-earliest-layer`:
+// LayerIndex == 0 → OriginBaseImage; > 0 → OriginApplication. The
+// heuristic isn't perfect for multi-stage builds where the base
+// occupies layers 0-N, but covers the dominant alpine-FROM-image
+// case the run-2 benchmark exposed (C-nginx 0% → ≥ 80% target).
+// ADR-0059 amendment.
 func (e *Enricher) classifyComponent(c *model.Component, baseSet *contenthash.BaseSet, targetHashes map[string]string, stats *contentStats) model.Origin {
 	paths := pathsForComponent(c)
 	if len(paths) == 0 {
+		if o, ok := classifyApkByLayerIndex(c); ok {
+			return o
+		}
 		return model.OriginUnknown
 	}
 
@@ -552,6 +570,32 @@ func originFor(c *model.Component, diff *layer.Diff) model.Origin {
 	default:
 		return model.OriginUnknown
 	}
+}
+
+// classifyApkByLayerIndex returns the Origin for an apk component
+// whose path set is empty (apk DB path was the only Syft location
+// and we filtered it out). Falls through with (Unknown, false) when
+// the component isn't apk OR doesn't carry the apk-earliest stamp.
+// S7 Task 2 / ADR-0059 amendment.
+func classifyApkByLayerIndex(c *model.Component) (model.Origin, bool) {
+	if c == nil || !strings.HasPrefix(c.PURL, "pkg:apk/") {
+		return "", false
+	}
+	if c.LayerInfo == nil {
+		return "", false
+	}
+	if c.Properties != nil &&
+		c.Properties[model.PropertyLayerSource] != "apk-earliest-layer" {
+		// Components attributed by a different path (filemap-
+		// last-touch, syft-location-property) don't have the
+		// "earliest layer" semantic — falling back would
+		// misclassify packages mass-rewritten by `apk add`.
+		return "", false
+	}
+	if c.LayerInfo.LayerIndex == 0 {
+		return model.OriginBaseImage, true
+	}
+	return model.OriginApplication, true
 }
 
 // pathsForComponent returns every file path the component covers,

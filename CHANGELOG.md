@@ -165,6 +165,26 @@ public CLI / output surface.
 
 ### Fixed
 
+- **Alpine apk origin classification on empty-paths fallback.**
+  Sprint 7 run-2 benchmark measured C-nginx origin accuracy at
+  **0 %** (0/20 sampled apk components classified) — regressed
+  from the run-1 baseline of 15 % (3/20). Root cause: the
+  combination of Sprint 6 Task 2's two pieces produced a
+  degenerate case. When Syft stamped ONLY the apk DB path
+  (`/lib/apk/db/installed`) on an apk component (the common
+  case for apk catalogers that use the DB record as evidence),
+  the S6-T2 path-filter stripped it (correct — the DB path is
+  metadata, not the artifact) AND the basediff
+  `classifyComponent`'s `if len(paths) == 0 { return
+  OriginUnknown }` short-circuit returned Unknown, losing the
+  layer-index information apk-earliest already resolved. New
+  `classifyApkByLayerIndex` fallback fires when the path set
+  is empty AND the component carries `astinus:layer:source =
+  apk-earliest-layer`: LayerIndex == 0 → OriginBaseImage,
+  LayerIndex > 0 → OriginApplication. Restores the dominant
+  single-stage alpine-FROM-image pattern (C-nginx). See
+  ADR-0059 (amended).
+
 - **Input-side CPE encoding normalisation.** Sprint 7 run-2
   benchmark reported 27 URL-percent violations on D-postgres
   and 2 on B-airflow despite Sprint 6 Task 1's backslash-escape
