@@ -572,25 +572,45 @@ func originFor(c *model.Component, diff *layer.Diff) model.Origin {
 	}
 }
 
-// classifyApkByLayerIndex returns the Origin for an apk component
-// whose path set is empty (apk DB path was the only Syft location
-// and we filtered it out). Falls through with (Unknown, false) when
-// the component isn't apk OR doesn't carry the apk-earliest stamp.
-// S7 Task 2 / ADR-0059 amendment.
+// classifyApkByLayerIndex returns the Origin for an apk OR deb
+// component whose path set is empty (package-manager DB path was
+// the only Syft location and we filtered it out). Falls through
+// with (Unknown, false) when the component isn't package-managed
+// OR doesn't carry the right earliest-layer source stamp. S7
+// Task 2 (apk-only); S7 Task 3 extends to deb. ADR-0059 /
+// ADR-0060 amendment.
+//
+// Name kept for historical compatibility with S6-T2 tests; the
+// helper now serves both apk and deb. A future task can rename
+// to `classifyByEarliestLayerIndex` once the surface settles.
 func classifyApkByLayerIndex(c *model.Component) (model.Origin, bool) {
-	if c == nil || !strings.HasPrefix(c.PURL, "pkg:apk/") {
+	if c == nil {
+		return "", false
+	}
+	isApk := strings.HasPrefix(c.PURL, "pkg:apk/")
+	isDeb := strings.HasPrefix(c.PURL, "pkg:deb/")
+	if !isApk && !isDeb {
 		return "", false
 	}
 	if c.LayerInfo == nil {
 		return "", false
 	}
-	if c.Properties != nil &&
-		c.Properties[model.PropertyLayerSource] != "apk-earliest-layer" {
-		// Components attributed by a different path (filemap-
-		// last-touch, syft-location-property) don't have the
-		// "earliest layer" semantic — falling back would
-		// misclassify packages mass-rewritten by `apk add`.
-		return "", false
+	if c.Properties != nil {
+		src := c.Properties[model.PropertyLayerSource]
+		wantSrc := ""
+		switch {
+		case isApk:
+			wantSrc = "apk-earliest-layer"
+		case isDeb:
+			wantSrc = "deb-earliest-layer"
+		}
+		if src != wantSrc {
+			// Components attributed by a different path (filemap-
+			// last-touch, syft-location-property) don't have the
+			// "earliest layer" semantic — falling back would
+			// misclassify packages mass-rewritten by apt-get/apk.
+			return "", false
+		}
 	}
 	if c.LayerInfo.LayerIndex == 0 {
 		return model.OriginBaseImage, true
@@ -632,18 +652,27 @@ func pathsForComponent(c *model.Component) []string {
 	return filterApkMetadataPaths(c, out)
 }
 
-// filterApkMetadataPaths drops the apk-DB path from `paths` when c
-// is an apk-managed component. Returns paths unchanged for non-apk
-// rows so the helper composes with other path-shapes without
-// branching at the call site. S6 Task 2.
+// filterApkMetadataPaths drops package-manager metadata paths
+// (apk DB, dpkg status) from `paths` when c is a package-managed
+// component whose ecosystem matches the path's owning system.
+// Returns paths unchanged for components that don't match. S6
+// Task 2 (apk); S7 Task 3 extends to deb.
 func filterApkMetadataPaths(c *model.Component, paths []string) []string {
-	if c == nil || !strings.HasPrefix(c.PURL, "pkg:apk/") {
+	if c == nil {
+		return paths
+	}
+	dropApk := strings.HasPrefix(c.PURL, "pkg:apk/")
+	dropDeb := strings.HasPrefix(c.PURL, "pkg:deb/")
+	if !dropApk && !dropDeb {
 		return paths
 	}
 	out := paths[:0]
 	for _, p := range paths {
 		normalized := layer.NormalizePath(p)
-		if normalized == layer.ApkInstalledPath {
+		if dropApk && normalized == layer.ApkInstalledPath {
+			continue
+		}
+		if dropDeb && normalized == layer.DpkgStatusPath {
 			continue
 		}
 		out = append(out, p)

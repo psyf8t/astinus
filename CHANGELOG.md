@@ -165,6 +165,33 @@ public CLI / output surface.
 
 ### Fixed
 
+- **Debian per-package layer attribution (dpkg-earliest).**
+  Sprint 7 run-2 measured D-postgres origin accuracy at 60 %
+  (12/20) with **bidirectional** mismatches in the remaining
+  40 %: some `debian:trixie-slim` base packages labelled
+  `application`, some postgres-Dockerfile-added packages
+  labelled `base`. The dpkg status file is rewritten on every
+  `apt-get install` / `apt-get remove` / `apt-get upgrade`, so
+  the FileMap's last-touch lookup against any deb-managed path
+  collapses pre-existing AND newly-added packages onto the
+  last apt-touching layer — exactly the apk-earliest problem
+  S6-T2 / S7-T2 closed for Alpine. New
+  `internal/image/layer/dpkg_db.go` parses
+  `/var/lib/dpkg/status` (RFC822-style; ignores continuation
+  lines for `Description:` blocks) and builds a
+  `(name@version) → earliest layer index` map alongside the
+  apk equivalent. New `FileMap.DpkgEarliestLayer(name, version)`
+  query. New
+  `internal/enrich/attribution/deb_earliest.go::applyDebEarliest`
+  runs after applyApkEarliest, overrides LayerInfo for
+  `pkg:deb/...` components, stamps `astinus:layer:source =
+  deb-earliest-layer`. basediff's `pathsForComponent` filter
+  generalises to strip `/var/lib/dpkg/status` for deb
+  components; `classifyApkByLayerIndex` fallback generalises
+  to deb (LayerIndex == 0 → base, > 0 → application; source
+  stamp must match the right ecosystem). See ADR-0060
+  (amended).
+
 - **Alpine apk origin classification on empty-paths fallback.**
   Sprint 7 run-2 benchmark measured C-nginx origin accuracy at
   **0 %** (0/20 sampled apk components classified) — regressed

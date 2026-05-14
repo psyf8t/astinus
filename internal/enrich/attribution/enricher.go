@@ -90,6 +90,13 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 	// base-shipped packages from operator-added ones. ADR-0059.
 	applyApkEarliest(sbom.Components, fileMap)
 
+	// S7 Task 3: deb components get the same treatment. The dpkg
+	// status file is rewritten on every apt-get operation, so
+	// last-touch attribution collapses to the last apt-touching
+	// layer. dpkg-earliest restores per-package layer attribution.
+	// ADR-0060 amendment.
+	applyDebEarliest(sbom.Components, fileMap)
+
 	e.stampRuntimeAndConfidence(sbom, bundle)
 	return nil
 }

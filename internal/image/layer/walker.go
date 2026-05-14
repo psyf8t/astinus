@@ -44,6 +44,13 @@ type FileMap struct {
 	// apk DB body in every layer that writes it. Empty on images
 	// without `/lib/apk/db/installed`. S6 Task 2 / ADR-0059.
 	apkEarliest map[string]int
+
+	// dpkgEarliest is the deb counterpart to apkEarliest — maps
+	// `name@version` (from `/var/lib/dpkg/status` records) to the
+	// 0-based index of the EARLIEST layer in which the record
+	// appeared. Empty on images without `/var/lib/dpkg/status`.
+	// S7 Task 3 / ADR-0060 amendment.
+	dpkgEarliest map[string]int
 }
 
 // Info describes one layer in the order it was applied.
@@ -140,6 +147,32 @@ func (m *FileMap) ApkEarliestLayer(name, version string) (Info, bool) {
 	return m.layers[idx], true
 }
 
+// DpkgEarliestLayer is the deb counterpart to ApkEarliestLayer.
+// Returns the Info of the layer that FIRST recorded (name, version)
+// in `/var/lib/dpkg/status`. The dpkg status file is rewritten on
+// every apt operation, so the FileMap's last-touch lookup against
+// the status path collapses every deb component to the last
+// apt-touching layer. The earliest-layer index distinguishes
+// debian base-image packages (installed in layer 0) from
+// application-layer additions (installed by later Dockerfile RUN
+// apt-get install commands). Returns (Info{}, false) when the
+// FileMap was not built from a debian/ubuntu-style image or the
+// (name, version) tuple isn't in the index. S7 Task 3 / ADR-0060
+// amendment.
+func (m *FileMap) DpkgEarliestLayer(name, version string) (Info, bool) {
+	if m == nil || m.dpkgEarliest == nil {
+		return Info{}, false
+	}
+	idx, ok := m.dpkgEarliest[dpkgRecordKey(name, version)]
+	if !ok {
+		return Info{}, false
+	}
+	if idx < 0 || idx >= len(m.layers) {
+		return Info{}, false
+	}
+	return m.layers[idx], true
+}
+
 // Len reports how many distinct paths the FileMap tracks.
 func (m *FileMap) Len() int {
 	if m == nil {
@@ -169,9 +202,10 @@ func Walk(ctx context.Context, img v1.Image) (*FileMap, error) {
 	}
 
 	m := &FileMap{
-		paths:       make(map[string]int),
-		layers:      descs,
-		apkEarliest: make(map[string]int),
+		paths:        make(map[string]int),
+		layers:       descs,
+		apkEarliest:  make(map[string]int),
+		dpkgEarliest: make(map[string]int),
 	}
 
 	for i, lyr := range layers {
@@ -308,7 +342,30 @@ func walkLayer(layerIdx int, lyr v1.Layer, m *FileMap) error {
 			if name == apkInstalledPath {
 				recordApkEarliest(tr, m, layerIdx)
 			}
+			// Same shape for the dpkg status file. S7 Task 3 /
+			// ADR-0060 amendment.
+			if name == dpkgStatusPath {
+				recordDpkgEarliest(tr, m, layerIdx)
+			}
 		}
+	}
+}
+
+// recordDpkgEarliest is the deb counterpart to recordApkEarliest.
+// Streams the in-progress tar entry through parseDpkgStatus and
+// stamps each (name@version) at layerIdx — but only when not
+// already present at an earlier index. S7 Task 3.
+func recordDpkgEarliest(tr io.Reader, m *FileMap, layerIdx int) {
+	records := parseDpkgStatus(tr)
+	for _, rec := range records {
+		key := dpkgRecordKey(rec.Name, rec.Version)
+		if key == "" {
+			continue
+		}
+		if _, seen := m.dpkgEarliest[key]; seen {
+			continue
+		}
+		m.dpkgEarliest[key] = layerIdx
 	}
 }
 
