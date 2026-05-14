@@ -1653,6 +1653,69 @@ func refRequiresNetwork(ref string) bool {
 //	none             → ModeNone (skip)
 //	anything else    → ModeExplicit, with the value as the reference
 //
+// buildCPESourceHTTPClient builds an http.Client tightly bound to
+// the operator-supplied per-call timeout for the CPE sources (NVD
+// + ClearlyDefined). Adds defense-in-depth on top of S6 Task 0's
+// per-call context.WithTimeout:
+//
+//   - Clones the operator's RoundTripper when it exposes a
+//     `*http.Transport` underneath (the common case via
+//     `internal/image/transport`'s `userAgentTransport` wrapper).
+//     Sets `ResponseHeaderTimeout = callTimeout` on the clone so
+//     a TCP connection that establishes but never sends response
+//     headers fails at the transport layer — independent of ctx
+//     propagation that some custom RoundTripper wrappers may not
+//     honour.
+//   - Client.Timeout caps the entire request at
+//     2 × callTimeout (max 60s) — softer than the ctx timeout
+//     so the legitimate-but-slow case (rate-limited response
+//     headers landing late) doesn't fail prematurely.
+//
+// Falls back to the unmodified transport + 30 s Client.Timeout
+// when the transport doesn't expose `*http.Transport` (test
+// fakes, future wrappers). S7 Task 0 / ADR-0057 hardening.
+func buildCPESourceHTTPClient(tr http.RoundTripper, callTimeout time.Duration) *http.Client {
+	if callTimeout <= 0 {
+		callTimeout = cpe.DefaultCallTimeout
+	}
+	if ht, ok := unwrapHTTPTransport(tr); ok {
+		clone := ht.Clone()
+		clone.ResponseHeaderTimeout = callTimeout
+		return &http.Client{
+			Transport: clone,
+			Timeout:   capDuration(2*callTimeout, 60*time.Second),
+		}
+	}
+	return &http.Client{Transport: tr, Timeout: 30 * time.Second}
+}
+
+// unwrapHTTPTransport returns the underlying *http.Transport when
+// rt is one (directly or via the `Base` field of a known wrapper
+// like `userAgentTransport`). Returns (nil, false) when the
+// transport shape isn't recognised — the caller falls back to the
+// safe-but-loose default. Centralised so future wrapper types can
+// extend the recognition in one place.
+func unwrapHTTPTransport(rt http.RoundTripper) (*http.Transport, bool) {
+	switch t := rt.(type) {
+	case *http.Transport:
+		return t, true
+	}
+	// userAgentTransport from internal/image/transport keeps the
+	// embedded transport in an unexported field — we can't reach
+	// it without an exported accessor. A future ADR can add one;
+	// today the fallback path is acceptable.
+	return nil, false
+}
+
+// capDuration returns d clamped to at most ceiling. Convenience
+// helper for the HTTP client's Timeout floor / ceiling logic.
+func capDuration(d, ceiling time.Duration) time.Duration {
+	if d > ceiling {
+		return ceiling
+	}
+	return d
+}
+
 // buildCPEEnricher composes the CPE enricher's resolver chain
 // based on operator-supplied flags + env vars.
 //
@@ -1704,7 +1767,7 @@ func buildCPEEnricher(opts *enrichOptions, tr http.RoundTripper, logger *slog.Lo
 	nvdSkipped := false
 	skippedSources := []string{}
 	if mode != cpesources.ModeOffline {
-		client := &http.Client{Transport: tr, Timeout: 30 * time.Second}
+		client := buildCPESourceHTTPClient(tr, opts.cpeCallTimeout)
 		nvdKey := opts.nvdAPIKey
 		if nvdKey == "" {
 			nvdKey = os.Getenv("NVD_API_KEY")

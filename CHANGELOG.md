@@ -165,6 +165,25 @@ public CLI / output surface.
 
 ### Fixed
 
+- **CPE-source HTTP transport gains `ResponseHeaderTimeout`
+  defense-in-depth.** Sprint 7 run-2 benchmark reported the
+  Airflow `--cpe-mode auto` hang as unchanged despite Sprint 6
+  Task 0's per-call ctx + per-source budget + total-cap. Root
+  cause: the operator transport's `ResponseHeaderTimeout` is
+  unset (Go default), so a TCP connection that establishes
+  but never sends response headers relied solely on context
+  propagation through the `RoundTripper` chain to bound the
+  wait. New `buildCPESourceHTTPClient(tr, callTimeout)` helper
+  clones the operator transport when it exposes a
+  `*http.Transport`, sets `ResponseHeaderTimeout =
+  --cpe-call-timeout` on the clone, and caps `Client.Timeout`
+  at `2 × callTimeout` (max 60 s). Transport-level timeout
+  fires independently of ctx propagation so a pathological
+  wrapper that swallows `ctx.Done` can't keep an HTTP request
+  alive past the operator-supplied per-call deadline. Fallback
+  path for non-`*http.Transport` round-trippers preserves the
+  pre-S7 30 s `Client.Timeout`. See ADR-0057 (amended).
+
 - **Compliance gate metadata stamps now reach the rendered SBOM
   file.** Pre-S6-T9 `evaluateComplianceGate` ran AFTER the SBOM
   was rendered to disk in `runPostRenderHooks`, so every VEX /
