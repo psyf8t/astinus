@@ -205,6 +205,8 @@ func (e *Enricher) Enrich(ctx context.Context, sbom *model.SBOM, bundle *image.B
 	elapsed := time.Since(start)
 
 	stampEnrichMetadata(sbom, capHit, elapsed, stats.examined, e.resolverStatuses())
+	perSrcTimeout, perCallTimeout := e.resolverTimeouts()
+	stampConfiguredTimeouts(sbom, e.totalCap, perSrcTimeout, perCallTimeout)
 
 	slog.Default().Info("cpe.complete",
 		"components_examined", stats.examined,
@@ -432,6 +434,49 @@ func countComponentsRecursive(comps []model.Component) int {
 		}
 	}
 	return n
+}
+
+// resolverTimeouts surfaces the per-source + per-call timeouts the
+// underlying resolver was configured with, so the enricher can
+// stamp them on SBOM metadata. Returns (0, 0) when the resolver
+// doesn't track timeouts (legacy chains, test fakes). S8 Task 0.
+func (e *Enricher) resolverTimeouts() (perSource, perCall time.Duration) {
+	type timeoutReporter interface {
+		Timeouts() (time.Duration, time.Duration)
+	}
+	if tr, ok := e.chain.(timeoutReporter); ok {
+		return tr.Timeouts()
+	}
+	return 0, 0
+}
+
+// stampConfiguredTimeouts writes the operator-supplied wall-time
+// bounds on SBOM metadata so when total-cap-hit fires, the
+// operator reads BOTH the elapsed wall-time AND the cap that
+// produced the trip without cross-referencing the CLI invocation.
+// Idempotent. S8 Task 0 / ADR-0057 amendment.
+func stampConfiguredTimeouts(sbom *model.SBOM, totalCap, perSource, perCall time.Duration) {
+	if sbom == nil {
+		return
+	}
+	if sbom.Metadata.Properties == nil {
+		sbom.Metadata.Properties = map[string]string{}
+	}
+	if totalCap > 0 {
+		sbom.Metadata.Properties[model.PropertyCPETotalCapConfigured] = totalCap.String()
+	} else {
+		delete(sbom.Metadata.Properties, model.PropertyCPETotalCapConfigured)
+	}
+	if perSource > 0 {
+		sbom.Metadata.Properties[model.PropertyCPESourceTimeoutConfigured] = perSource.String()
+	} else {
+		delete(sbom.Metadata.Properties, model.PropertyCPESourceTimeoutConfigured)
+	}
+	if perCall > 0 {
+		sbom.Metadata.Properties[model.PropertyCPECallTimeoutConfigured] = perCall.String()
+	} else {
+		delete(sbom.Metadata.Properties, model.PropertyCPECallTimeoutConfigured)
+	}
 }
 
 // stampEnrichMetadata writes the S6-T0 wall-time observability

@@ -81,6 +81,15 @@ const (
 	// see per-source outcome without parsing the aggregate lists.
 	// S6 Task 0 / ADR-0057.
 	PropertyCPESourceStatusPrefix = "astinus:cpe:source-status:"
+	// PropertyCPETotalCapConfigured / PropertyCPESourceTimeoutConfigured
+	// / PropertyCPECallTimeoutConfigured stamp the operator-supplied
+	// wall-time bounds at run start. When :total-cap-hit fires,
+	// operators read the SBOM and see both the elapsed wall-time AND
+	// the cap that produced the trip — no need to cross-reference the
+	// CLI invocation. S8 Task 0 / ADR-0057 amendment.
+	PropertyCPETotalCapConfigured      = "astinus:cpe:total-cap-configured"
+	PropertyCPESourceTimeoutConfigured = "astinus:cpe:source-timeout-configured"
+	PropertyCPECallTimeoutConfigured   = "astinus:cpe:call-timeout-configured"
 
 	// Top-level metadata stamp emitted on every Astinus-touched SBOM.
 	PropertyEnrichedBy      = "astinus:enriched-by"

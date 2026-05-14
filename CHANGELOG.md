@@ -165,6 +165,26 @@ public CLI / output surface.
 
 ### Fixed
 
+- **CPE wall-time bounds now stamp configured values on SBOM
+  metadata.** Pre-S8 the only wall-time SBOM metadata was the
+  fire-state (`astinus:cpe:total-cap-hit`) + elapsed
+  (`astinus:cpe:elapsed-seconds`) — operators reading
+  `total-cap-hit=true elapsed=180.05` had to cross-reference
+  the CLI invocation to know the cap was 3m. Three new
+  metadata stamps land on every CPE-enricher run:
+  `astinus:cpe:total-cap-configured`,
+  `astinus:cpe:source-timeout-configured`,
+  `astinus:cpe:call-timeout-configured`. Values are
+  `time.Duration.String()`-formatted (`3m0s`, `60s`, `10s`).
+  Zero / unset durations delete the stamp rather than writing
+  misleading `0s` — legacy resolvers without timeout tracking
+  see no extra metadata, no regression. New
+  `MultiSourceResolver.Timeouts()` accessor surfaces the
+  configured durations from the resolver; the enricher's
+  `resolverTimeouts()` helper type-asserts so non-MultiSource
+  chains (BundledResolver / Chain) flow through unchanged.
+  See ADR-0057 (amended).
+
 - **Sprint 7 close — acceptance suite verified against the
   baseline.** Re-ran `go test -tags acceptance ./test/acceptance/
   sprint4/... ./test/acceptance/sprint5/... ./test/acceptance/

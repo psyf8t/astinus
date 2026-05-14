@@ -30,10 +30,26 @@ type MultiSourceResolver struct {
 	// Zero-value-empty map ⇒ no budget enforcement (legacy / tests).
 	budgets map[string]*SourceBudget
 
+	// perSourceTimeout / perCallTimeout cache the configured
+	// wall-time bounds so callers (the enricher's
+	// stampConfiguredTimeouts helper, ADR-0057 S8 amendment) can
+	// surface them on SBOM metadata. S8 Task 0.
+	perSourceTimeout time.Duration
+	perCallTimeout   time.Duration
+
 	// statusMu guards statuses; tracking is read by the CLI layer
 	// at end-of-run to stamp `astinus:cpe:source-status:<name>`.
 	statusMu sync.Mutex
 	statuses map[string]string
+}
+
+// Timeouts returns the operator-supplied per-source budget and
+// per-call deadline the resolver was constructed with. Surfaced
+// for the enricher's `astinus:cpe:*-timeout-configured` SBOM
+// metadata stamps (ADR-0057 S8 amendment). Returns (0, 0) when
+// the resolver was constructed without timeouts (legacy / tests).
+func (r *MultiSourceResolver) Timeouts() (perSource, perCall time.Duration) {
+	return r.perSourceTimeout, r.perCallTimeout
 }
 
 // Options configures a MultiSourceResolver.
@@ -104,11 +120,13 @@ func NewMultiSource(opts Options) *MultiSourceResolver {
 		cache = NewCache()
 	}
 	out := &MultiSourceResolver{
-		mode:     mode,
-		logger:   logger,
-		cache:    cache,
-		budgets:  map[string]*SourceBudget{},
-		statuses: map[string]string{},
+		mode:             mode,
+		logger:           logger,
+		cache:            cache,
+		budgets:          map[string]*SourceBudget{},
+		perSourceTimeout: opts.PerSourceTimeout,
+		perCallTimeout:   opts.PerCallTimeout,
+		statuses:         map[string]string{},
 	}
 	for _, s := range opts.Sources {
 		if s == nil {
