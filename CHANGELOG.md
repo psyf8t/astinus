@@ -185,6 +185,17 @@ public CLI / output surface.
   chains (BundledResolver / Chain) flow through unchanged.
   See ADR-0057 (amended).
 
+- **License policy verified on `87bff5c` baseline (Sprint 8 Task 5).**
+  The Sprint 8 task spec is path-renamed-only vs Sprint 6 / 7
+  Task 8. The implementation (internal/license/expr.go SPDX
+  allow/deny + applyLicenseGate in CLI + ADR-0065) shipped under
+  S6-T8 satisfies the Sprint 8 DoD unchanged. `go test
+  ./internal/license/... ./internal/cli/...` GREEN; acceptance
+  gates `TestS6T8_LicenseDenyGPLFailsTheGate` +
+  `TestS6T8_LicenseAllowOnlyMITPassesAllowedComponent` +
+  `TestS6Stage14_VEX_Policy_License_ComposeCleanly` GREEN. No
+  code change.
+
 - **Policy framework verified on `87bff5c` baseline (Sprint 8 Task 4).**
   The Sprint 8 task spec is path-renamed-only vs Sprint 6 / 7
   Task 7. The implementation (internal/policy/ rules + loader +
