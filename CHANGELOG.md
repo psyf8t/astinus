@@ -165,6 +165,18 @@ public CLI / output surface.
 
 ### Fixed
 
+- **Bundled hyper crate CPE mapping corrected.** Sprint 7
+  run-2 flagged Astinus's first WORSE CPE-quality verdict
+  across all benchmark runs: Syft baseline
+  `cpe:2.3:a:hyper:hyper:1.0.0:*:*` (278 NVD matches) vs
+  Astinus pre-S7 `cpe:2.3:a:hyperium:hyper:1.0.0:*:*` (0 NVD
+  matches). The pre-S7 bundled mapping carried `hyper` →
+  `hyperium:hyper` based on the GitHub org name; NVD registers
+  the crate under `hyper:hyper` directly. One-line data
+  correction in `internal/enrich/cpe/builtin/purl_to_cpe.json`;
+  unit test pins the new shape so a future regression fails
+  fast. See ADR-0062 (amended).
+
 - **python:slim AddedPackages expanded for broader chain
   coverage.** Sprint 7 run-2 measured B-airflow origin accuracy
   at 70 % (14/20) — +5 % vs run-1, within noise. The Sprint 6

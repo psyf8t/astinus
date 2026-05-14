@@ -49,7 +49,7 @@
     {"purl_type": "cargo", "purl_name": "tokio", "vendor": "tokio_project", "product": "tokio"},
     {"purl_type": "cargo", "purl_name": "serde", "vendor": "serde_project", "product": "serde"},
     {"purl_type": "cargo", "purl_name": "actix-web", "vendor": "actix", "product": "actix-web"},
-    {"purl_type": "cargo", "purl_name": "hyper", "vendor": "hyperium", "product": "hyper"},
+    {"purl_type": "cargo", "purl_name": "hyper", "vendor": "hyper", "product": "hyper"},
 
     {"purl_type": "nuget", "purl_name": "Newtonsoft.Json", "vendor": "newtonsoft", "product": "json.net"},
     {"purl_type": "nuget", "purl_name": "Microsoft.AspNetCore.App", "vendor": "microsoft", "product": "asp.net_core"},
