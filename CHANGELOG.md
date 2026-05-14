@@ -185,6 +185,20 @@ public CLI / output surface.
   chains (BundledResolver / Chain) flow through unchanged.
   See ADR-0057 (amended).
 
+- **CPE alt-candidate preservation verified on `87bff5c` baseline.**
+  Sprint 8 README's run-3 benchmark repeated the C-nginx
+  `ssl_client` CVE-2025-60876 TP regression observation —
+  verification confirms the S6-T5 implementation closing the
+  regression (`appendSyftCPEs` preserving multi-`syft:cpe23`
+  duplicates, `isNumericExtraCPEKey` narrowing hydration to the
+  numeric `astinus:cpe:<N>` shape, `maxAlternativesEmitted = 10`
+  cap, S7-T5's `hyper:hyper` cargo correction) is already in
+  place on the run-3 baseline and all six unit pins remain
+  green. No code change; the run-3 observation reads against a
+  pre-S6-T5 code shape rather than what `87bff5c` carries.
+  C-nginx end-to-end Grype-binary recovery remains the S8-T6
+  acceptance gate. See ADR-0062 (verified).
+
 - **CPE input-normalisation count now stamps on SBOM metadata.**
   S7-T1 added `NormalizeCPEEncoding` to repair URL-percent-encoded
   CPE attribute slots (`%3A` → `\:`, `%2B` → `\+`) at ingest time,
