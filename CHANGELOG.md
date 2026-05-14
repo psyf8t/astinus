@@ -185,6 +185,20 @@ public CLI / output surface.
   chains (BundledResolver / Chain) flow through unchanged.
   See ADR-0057 (amended).
 
+- **Sprint 8 close — acceptance suite verified against the
+  baseline.** Re-ran `go test -tags acceptance ./test/acceptance/
+  sprint3/... ./test/acceptance/sprint4/... ./test/acceptance/
+  sprint5/... ./test/acceptance/sprint6/...` GREEN against the
+  post-S8 baseline; 11 in-process Sprint 6 gates continue to
+  cover the S6 + S7 + S8 amended contracts. Sprint 8 net delta:
+  two ADR amendments (0057 wall-time stamps, 0058 normalised-count),
+  one ADR verification entry (0062 alt-CPE preservation), four
+  no-op verifications (T2/T3/T4/T5). 4-image pinned-digest
+  bundle + CI matrix workflow remain deferred to Sprint 9 —
+  the carry-forward from S6-T9 and S7-T9 holds; in-process
+  gates cover the same contracts. ADR-0066 amended in-place
+  under "S8 Task 6 amendment".
+
 - **License policy verified on `87bff5c` baseline (Sprint 8 Task 5).**
   The Sprint 8 task spec is path-renamed-only vs Sprint 6 / 7
   Task 8. The implementation (internal/license/expr.go SPDX
