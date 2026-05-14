@@ -217,7 +217,21 @@
         "python3.12",
         "python3.12-minimal",
         "ca-certificates",
-        "libssl3"
+        "libssl3",
+        "libexpat1",
+        "libsqlite3-0",
+        "libreadline8",
+        "libtinfo6",
+        "libffi8",
+        "libbz2-1.0",
+        "liblzma5",
+        "libuuid1",
+        "libcrypt1",
+        "libgdbm6",
+        "libgdbm-compat4",
+        "libncursesw6",
+        "tzdata",
+        "media-types"
       ]
     },
     {
@@ -238,7 +252,21 @@
         "python3.13",
         "python3.13-minimal",
         "ca-certificates",
-        "libssl3"
+        "libssl3",
+        "libexpat1",
+        "libsqlite3-0",
+        "libreadline8",
+        "libtinfo6",
+        "libffi8",
+        "libbz2-1.0",
+        "liblzma5",
+        "libuuid1",
+        "libcrypt1",
+        "libgdbm6",
+        "libgdbm-compat4",
+        "libncursesw6",
+        "tzdata",
+        "media-types"
       ]
     },
     {
@@ -260,7 +288,21 @@
         "python3.13",
         "python3.13-minimal",
         "ca-certificates",
-        "libssl3"
+        "libssl3",
+        "libexpat1",
+        "libsqlite3-0",
+        "libreadline8",
+        "libtinfo6",
+        "libffi8",
+        "libbz2-1.0",
+        "liblzma5",
+        "libuuid1",
+        "libcrypt1",
+        "libgdbm6",
+        "libgdbm-compat4",
+        "libncursesw6",
+        "tzdata",
+        "media-types"
       ]
     },
     {

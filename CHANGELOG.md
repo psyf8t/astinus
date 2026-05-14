@@ -165,6 +165,21 @@ public CLI / output surface.
 
 ### Fixed
 
+- **python:slim AddedPackages expanded for broader chain
+  coverage.** Sprint 7 run-2 measured B-airflow origin accuracy
+  at 70 % (14/20) — +5 % vs run-1, within noise. The Sprint 6
+  Task 4 chain visibility stamps work, but the minimal 7-entry
+  AddedPackages lists for python:slim entries cover only the
+  python interpreter + ca-certificates + libssl3, missing the
+  ~14 typical apt-installed runtime deps every python:slim
+  image carries (libexpat1, libsqlite3-0, libreadline8,
+  libtinfo6, libffi8, libbz2-1.0, liblzma5, libuuid1,
+  libcrypt1, libgdbm6, libgdbm-compat4, libncursesw6, tzdata,
+  media-types). Expanded all three python:slim entries
+  (3.12-bookworm, 3.13-bookworm, 3.13-trixie) from 7 → 21
+  packages each. Chain-resolution code path unchanged. See
+  ADR-0061 (amended).
+
 - **Debian per-package layer attribution (dpkg-earliest).**
   Sprint 7 run-2 measured D-postgres origin accuracy at 60 %
   (12/20) with **bidirectional** mismatches in the remaining
