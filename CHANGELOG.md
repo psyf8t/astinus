@@ -185,6 +185,16 @@ public CLI / output surface.
   chains (BundledResolver / Chain) flow through unchanged.
   See ADR-0057 (amended).
 
+- **Policy framework verified on `87bff5c` baseline (Sprint 8 Task 4).**
+  The Sprint 8 task spec is path-renamed-only vs Sprint 6 / 7
+  Task 7. The implementation (internal/policy/ rules + loader +
+  applyPolicies in CLI + ADR-0064) shipped under S6-T7 satisfies
+  the Sprint 8 DoD unchanged. `go test ./internal/policy/...
+  ./internal/cli/...` GREEN; acceptance gates
+  `TestS6T7_PolicyDenyFailsTheGate` +
+  `TestS6Stage14_VEX_Policy_License_ComposeCleanly` GREEN. No
+  code change.
+
 - **VEX support verified on `87bff5c` baseline (Sprint 8 Task 3).**
   The Sprint 8 task spec is path-renamed-only vs Sprint 6 / 7
   Task 6. The implementation (internal/vex/ parser + applyVEXSuppression
