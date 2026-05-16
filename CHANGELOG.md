@@ -13,6 +13,27 @@ public CLI / output surface.
 
 ### Fixed
 
+- **CPE wall-time defense composite end-to-end pin (Sprint 9 Task 0).**
+  The four-layer wall-time defense (per-call ctx, per-source
+  budget, total cap, transport `ResponseHeaderTimeout`) shipped
+  through S6-T0 / S7-T0 / S8-T0 and remained intact on
+  `87bff5c`+ — Sprint 9 Stage A diagnostic confirmed every layer
+  fires correctly in unit reproducers. The genuine gap S9 closed:
+  no single test exercised the full CLI-built pipeline against a
+  hung server. NEW `internal/cli/cpe_walltime_composite_test.go`
+  adds two composite reproducers that wire
+  `buildCPESourceHTTPClient` → `NVDAPISource` →
+  `MultiSourceResolver` → `Enricher` against a real
+  `httptest.Server` whose handler blocks on `r.Context().Done()`
+  (the production Cloudflare-fronted idle-TCP failure shape).
+  The first test asserts the four layers compose to bound a
+  50-component run at ≈ 200 ms with hung-server backend; the
+  second drives a `slowCPESource` stub to prove the third layer
+  (total cap) fires when the per-source defense gets bypassed.
+  Both tests run in `make test` default — they trip any future
+  PR that breaks the defense end-to-end. No production code
+  change. See ADR-0057 (amended).
+
 - **`--base auto` now resolves base for `debian:trixie-slim` /
   `debian:13-slim` (Debian 13) images.** Run #4 measured
   D-postgres origin coverage at **0 %** (4134/4134 components
