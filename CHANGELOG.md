@@ -13,6 +13,27 @@ public CLI / output surface.
 
 ### Fixed
 
+- **CPE 2.3 encoding composite end-to-end pin (Sprint 9 Task 1).**
+  The three CPE-encoding layers (S6-T1 output-side
+  `EscapeCPE23Attribute`, S7-T1 ingest-side `NormalizeCPEEncoding`,
+  S8-T1 `astinus:cpe:input-normalised-count` stamp) all shipped
+  and remained intact on `87bff5c → 3577eb3` — Sprint 9 Stage A
+  diagnostic verified zero `url.PathEscape`/`url.QueryEscape`
+  calls in any CPE-generation site and 10 unit tests green. NEW
+  `internal/enrich/cpe/encoding_composite_test.go::TestEnricher_NoURLPercentLeaksOnDebEpochSBOM`
+  drives a 5-component Debian-style SBOM (mixing pre-S7
+  URL-percent `%3A`/`%2B`, already-spec-correct `\:`/`\+`, and
+  non-special inputs) through `Enricher.Enrich` and asserts ZERO
+  `%xx` substrings survive into the output across every emission
+  surface (primary `c.CPEs[0]`, alternatives `c.CPEs[1..]`, every
+  CPE-bearing `c.Properties` value, every SBOM-level
+  `Metadata.Properties` value). Every output CPE also
+  round-trips through `IsValidCPE` for structural validity. The
+  test asserts `astinus:cpe:input-normalised-count = "3"` (3 of
+  5 inputs needed repair). Runs in `make test` default — trips
+  any future PR that re-breaks the three layers' end-to-end
+  composition. No production code change. See ADR-0058 (amended).
+
 - **CPE wall-time defense composite end-to-end pin (Sprint 9 Task 0).**
   The four-layer wall-time defense (per-call ctx, per-source
   budget, total cap, transport `ResponseHeaderTimeout`) shipped
