@@ -13,6 +13,27 @@ public CLI / output surface.
 
 ### Fixed
 
+- **CPE alt-candidate preservation composite end-to-end pin
+  (Sprint 9 Task 2).** The S6-T5 preservation layers
+  (`appendSyftCPEs` preserving multi-`syft:cpe23` duplicates in
+  the CDX reader, `isNumericExtraCPEKey` narrowing
+  `hydrateAstinusFields`, `maxAlternativesEmitted = 10` cap +
+  pre-cap `astinus:cpe:alternatives-count` stamp) all shipped
+  and remained intact on `87bff5c → 709218e` — Sprint 9 Stage A
+  diagnostic verified 6 unit tests green. NEW
+  `internal/cli/cpe_alt_preservation_composite_test.go::TestAltCPEPreservation_CompositePipelineOnSslClientCVE`
+  drives a real CDX 1.5 JSON fragment carrying 5 duplicate
+  `syft:cpe23` Property entries on a busybox-applet ssl_client
+  component (the exact Syft output shape for multi-product
+  applets) through `cyclonedx.ReadJSON → cpe.New().Enrich →
+  output`. Asserts every one of Syft's five vendor/product
+  fragments (busybox/busybox, busybox/ssl_client,
+  busybox/ssl-client, ssl_client/ssl_client, ssl-client/ssl-client)
+  survives into the operator-facing CPE set across primary +
+  alternative slots — closing the CVE-2025-60876 TP-loss
+  reproducer at unit-faithful level. Runs in `make test`
+  default. No production code change. See ADR-0062 (amended).
+
 - **CPE 2.3 encoding composite end-to-end pin (Sprint 9 Task 1).**
   The three CPE-encoding layers (S6-T1 output-side
   `EscapeCPE23Attribute`, S7-T1 ingest-side `NormalizeCPEEncoding`,
